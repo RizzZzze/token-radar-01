@@ -159,6 +159,22 @@ tbody tr:last-child td { border-bottom: 0; }
 .steps b { display: block; font-weight: 550; line-height: 1.5; }
 .cost { color: var(--muted); font-size: 12px; font-family: var(--font-num); }
 
+/* Verdicts and the yardstick (v2): badges per verdict, lever inputs, the final
+   backtest row, and the band line under each implied value. */
+.controls.yardstick { border-top: 0; padding-top: 0; align-items: end; }
+.controls > .lbl { color: var(--muted); font-size: 12px; align-self: center; }
+.controls.yardstick .sub { align-self: center; }
+.field.lever input { min-width: 110px; }
+.verdict { display: grid; gap: 1px; justify-items: start; }
+.vbadge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; }
+.vbadge.v-farm { background: var(--accent-soft); color: var(--accent); }
+.vbadge.v-thin { background: #f7ecdb; color: var(--highlight); }
+.vbadge.v-skip { background: #ece9e2; color: var(--muted); }
+tr.final-row { background: var(--accent-soft); }
+tr.final-row:hover { background: var(--accent-soft); }
+.implied { display: grid; grid-template-columns: 110px max-content; align-items: center; gap: 2px var(--step-2); }
+.implied .sub { grid-column: 1 / -1; }
+
 @media (max-width: 900px) {
   .shell, .topbar-inner { padding-left: var(--step-4); padding-right: var(--step-4); }
   .lede { grid-template-columns: 1fr; gap: var(--step-4); }

@@ -1,4 +1,5 @@
-// The token radar's model: one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model, version 3: one snapshot of the protocol universe in, one
+// ranked board out.
 //
 // The board ranks every protocol the snapshot's own watchlist rule keeps when the $50M
 // floor is lifted: it records no token, and it is not a wrapped, staked or bridged
@@ -7,21 +8,28 @@
 // name is ever special-cased: the same rule scores every row, so a future snapshot with
 // protocols that do not exist yet is ranked by the same code.
 //
-// Implied value is priced off the market that already trades. The clean comps are the
-// live-token protocols whose market-cap/TVL ratio lies in [0.001, 10] (119 of 144 on
-// this snapshot; the rest are near-zero or runaway ratios the median must not see).
-// Each category's multiple is its comps' median ratio, pooled toward the global median
-// with five pseudo-observations, so a category with one comp cannot set the price:
+// Implied value is priced off the market that already trades, by a size curve fitted
+// from this snapshot's own clean comps — the live-token protocols whose market-cap/TVL
+// ratio lies in [0.001, 10] (119 of 144 on this snapshot). The curve is a Huber-robust
+// regression of log market cap on log TVL, so one runaway token cannot drag the line:
 //
-//   multiple   = (n x categoryMedian + 5 x globalMedian) / (n + 5)   (n = 0: globalMedian)
-//   growth     = clamp(change_7d, -60, 120) per cent
-//   growthMult = 1 + (growth / 100) x 0.5
-//   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied    = max(1, round(tvl_usd x multiple x growthMult x maturity))
+//   log10(mcap) = a + b x log10(tvl_usd / $100M)          (a, b fitted at run time)
+//   implied     = max(1, round(10^(a + b x) x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)))
 //
-// Live-token protocols are never ranked: they are the comps, shown apart with the
-// market's own values. Farm plans are derived from each row's category, chains, TVL
-// and age, never from a hand-written list of names.
+// The growth factor is a fixed prior at weight 0.5, stated here, not a fitted
+// coefficient: the fitted growth weight is ~0 and the factor is out-of-sample neutral,
+// so it is kept only so seven-day momentum moves values. Everything else the data was
+// asked about and rejected — category offsets, fitted growth, fitted age, chain counts,
+// per-category slopes, a quadratic size term — is measured in the backtest this file
+// runs at build time and the dashboard's Method view reports. The uncertainty band is
+// the 80th percentile of the final model's own leave-one-out misses, recomputed from
+// the snapshot at run time; the verdict haircut is its median miss.
+//
+// Each row also carries a verdict in dollars: the expected net of farming it at a
+// $1,000 yardstick, after gas and a 4% hurdle, against the value the curve implies.
+// FARM clears the hurdle even after the typical-miss haircut, THIN clears it at the
+// point estimate, SKIP does not clear it. Farm plans are derived from each row's
+// category, chains, TVL, age and verdict, never from a hand-written list of names.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -51,30 +59,37 @@ export interface ModelConstants {
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  pool_weight: number;
   ratio_min: number;
   ratio_max: number;
+  huber_c: number;
+  huber_iters: number;
+  band_quantile: number;
+  haircut_quantile: number;
+  verdict_capital: number;
+  verdict_share: number;
+  hurdle_rate: number;
 }
 
 export const MODEL: ModelConstants = {
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  pool_weight: 5,
   ratio_min: 0.001,
   ratio_max: 10,
+  huber_c: 1.345,
+  huber_iters: 12,
+  band_quantile: 0.8,
+  haircut_quantile: 0.5,
+  verdict_capital: 1000,
+  verdict_share: 0.1,
+  hurdle_rate: 0.04,
 };
 
+/** The v1 model's frozen parameters, used only to score v1 in the backtest comparison. */
+const V1 = { pool_weight: 5, growth_weight: 0.5, growth_floor: -60, growth_cap: 120, maturity_floor: 0.6, maturity_range: 0.4, maturity_days: 1095, unknown_age_days: 365 };
+
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2-comps';
+export const MODEL_VERSION = 'radar-3-curve';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -85,12 +100,32 @@ export const EXCLUDED_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liqui
 /** Exchange names the watchlist rule refuses at the start of a protocol's name. */
 export const EXCHANGE_PREFIXES = ['Binance', 'Coinbase', 'Bybit', 'Kraken', 'Bitget', 'OKX', 'Bitfinex', 'Gemini'];
 
-/** One category's benchmark: its clean comps, their median ratio, and the pooled multiple. */
-export interface CompRow {
-  category: string;
-  n: number;
-  median: number;
-  pooled: number;
+/** A fitted size curve: log10(mcap) = intercept + slope x log10(tvl / $100M). */
+export interface CurveFit {
+  intercept: number;
+  slope: number;
+}
+
+/** One backtest row: a specification's out-of-sample misses, measured at build time. */
+export interface BacktestRow {
+  name: string;
+  loo_miss: number;
+  loo_within3: number;
+  ts_miss: number;
+  ts_within3: number;
+}
+
+/** The backtest: every specification measured, plus the band the misses calibrate. */
+export interface BacktestData {
+  rows: BacktestRow[];
+  loo_n: number;
+  ts_train_n: number;
+  ts_test_n: number;
+  ts_cutoff: string;
+  null_date_excluded: number;
+  band80: number;
+  band50: number;
+  loo_sd: number;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -99,6 +134,9 @@ export interface FarmStep {
   cost: string;
   time: string;
 }
+
+/** A verdict: FARM clears the hurdle after the haircut, THIN at the point estimate, SKIP neither. */
+export type Verdict = 'FARM' | 'THIN' | 'SKIP';
 
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
@@ -116,14 +154,18 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  band_low_usd: number;
+  band_high_usd: number;
+  verdict: Verdict;
+  net_usd: number;
   model: {
-    multiple: number;
-    comp_n: number;
-    comp_median: number | null;
-    multiple_source: 'pooled' | 'global';
+    curve_value_usd: number;
     growth_pct: number;
     growth_multiplier: number;
-    maturity_multiplier: number;
+    gross_usd: number;
+    cost_usd: number;
+    hold_days: number;
+    gas_usd: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -142,13 +184,17 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  multiple: number;
-  comp_n: number;
-  comp_median: number | null;
-  multiple_source: 'pooled' | 'global';
-  watchlist: boolean;
+  band_low_usd: number;
+  band_high_usd: number;
+  verdict: Verdict;
+  net_usd: number;
+  curve_value_usd: number;
   growth_multiplier: number;
-  maturity_multiplier: number;
+  gross_usd: number;
+  cost_usd: number;
+  hold_days: number;
+  gas_usd: number;
+  watchlist: boolean;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -163,7 +209,15 @@ export interface LiveRow {
   ratio: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, the benchmarks, and the model. */
+/** One clean comp, reduced to the three numbers the page's refit needs. */
+export interface FitComp {
+  slug: string;
+  x: number;
+  y: number;
+  g: number;
+}
+
+/** Everything the dashboard needs: the board, the live set, the curve, and the backtest. */
 export interface RadarData {
   as_of: string;
   source: string;
@@ -176,10 +230,12 @@ export interface RadarData {
   live_size: number;
   excluded_size: number;
   clean_comps: number;
-  global_median: number;
+  curve: CurveFit;
+  backtest: BacktestData;
+  fit_comps: FitComp[];
+  verdict_counts: { FARM: number; THIN: number; SKIP: number };
   rows: RadarRow[];
   live: LiveRow[];
-  comps: CompRow[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -203,6 +259,18 @@ export function median(values: number[]): number {
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
+
+/** A quantile of a sorted list, by the floor(q x n) order statistic. */
+function quantileSorted(sorted: number[], q: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]!;
+}
+
+/** Round to cents. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
@@ -245,80 +313,296 @@ export function cleanComps(snapshot: Snapshot, model: ModelConstants = MODEL): S
   );
 }
 
-/** The benchmarks: the global median ratio and one pooled multiple per category, by category name. */
-export function categoryMultiples(
-  snapshot: Snapshot,
-  model: ModelConstants = MODEL,
-): { global: number; clean: number; byCategory: Map<string, CompRow> } {
-  const comps = cleanComps(snapshot, model);
-  const global = median(comps.map((p) => p.mcap_usd! / p.tvl_usd));
-  const byName = new Map<string, number[]>();
-  for (const p of comps) {
-    const key = p.category ?? 'Uncategorized';
-    const list = byName.get(key) ?? [];
-    list.push(p.mcap_usd! / p.tvl_usd);
-    byName.set(key, list);
+// ---------------------------------------------------------------------------
+// The fit: ordinary least squares by Gaussian elimination, then Huber reweighting.
+// The dashboard's fitCurve is the same arithmetic, so the page refits the curve from
+// the comps in data.js and checks the coefficients this program used.
+// ---------------------------------------------------------------------------
+
+/** Solve A x = b by Gaussian elimination with partial pivoting. */
+function solveLinear(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let col = 0, row = 0; col < n && row < n; col++, row++) {
+    let piv = row;
+    for (let r = row + 1; r < n; r++) if (Math.abs(M[r]![col]!) > Math.abs(M[piv]![col]!)) piv = r;
+    [M[row], M[piv]] = [M[piv]!, M[row]!];
+    if (Math.abs(M[row]![col]!) < 1e-12) continue;
+    for (let r = 0; r < n; r++) {
+      if (r === row) continue;
+      const f = M[r]![col]! / M[row]![col]!;
+      for (let c = col; c <= n; c++) M[r]![c]! -= f * M[row]![c]!;
+    }
   }
-  const byCategory = new Map<string, CompRow>();
-  for (const key of [...byName.keys()].sort()) {
-    const ratios = byName.get(key)!;
-    const med = median(ratios);
-    byCategory.set(key, {
-      category: key,
-      n: ratios.length,
-      median: med,
-      pooled: (ratios.length * med + model.pool_weight * global) / (ratios.length + model.pool_weight),
-    });
-  }
-  return { global, clean: comps.length, byCategory };
+  return M.map((row, i) => row[n]! / row[i]!);
 }
 
-/** A category's pricing multiple: its pooled median, or the global median when it has no clean comp. */
-export function pooledMultiple(
-  category: string | null,
-  benchmarks: { global: number; byCategory: Map<string, CompRow> },
-): { multiple: number; n: number; compMedian: number | null; source: 'pooled' | 'global' } {
-  const row = category === null ? undefined : benchmarks.byCategory.get(category);
-  if (row === undefined) return { multiple: benchmarks.global, n: 0, compMedian: null, source: 'global' };
-  return { multiple: row.pooled, n: row.n, compMedian: row.median, source: 'pooled' };
+/** Least squares for y ~ X, with optional weights. */
+function ols(X: number[][], y: number[], weights?: number[]): number[] {
+  const k = X[0]!.length;
+  const A = Array.from({ length: k }, () => Array(k).fill(0));
+  const b = Array(k).fill(0);
+  for (let i = 0; i < X.length; i++) {
+    const w = weights ? weights[i]! : 1;
+    for (let r = 0; r < k; r++) {
+      b[r] += w * X[i]![r]! * y[i]!;
+      for (let c = 0; c < k; c++) A[r]![c]! += w * X[i]![r]! * X[i]![c]!;
+    }
+  }
+  return solveLinear(A, b);
 }
 
-/** The multipliers and the implied value one protocol gets under `model` and the benchmarks. */
+const dot = (a: number[], b: number[]): number => a.reduce((s, v, i) => s + v * b[i]!, 0);
+
+/** Huber-IRLS fit of y ~ columns: outliers are downweighted, never dropped. */
+function huberFit<T>(rows: T[], cols: (r: T) => number[], yOf: (r: T) => number, model: ModelConstants, robust: boolean): number[] {
+  const X = rows.map(cols);
+  const y = rows.map(yOf);
+  let beta = ols(X, y);
+  if (!robust) return beta;
+  for (let it = 0; it < model.huber_iters; it++) {
+    const res = rows.map((_, i) => y[i]! - dot(X[i]!, beta));
+    const med = median(res);
+    const mad = median(res.map((v) => Math.abs(v - med))) || 1e-6;
+    const s = 1.4826 * mad;
+    const w = res.map((v) => Math.min(1, (model.huber_c * s) / Math.max(Math.abs(v), 1e-9)));
+    const next = ols(X, y, w);
+    if (next.every((v, i) => Math.abs(v - beta[i]!) < 1e-10)) {
+      beta = next;
+      break;
+    }
+    beta = next;
+  }
+  return beta;
+}
+
+/** One comp's regression features, from its own snapshot record. */
+interface CompFeatures {
+  slug: string;
+  category: string;
+  tvl: number;
+  mcap: number;
+  x: number;
+  y: number;
+  g: number;
+  logAge: number;
+  logChains: number;
+  listedAt: string | null;
+  ageKnown: boolean;
+  growthMult: number;
+  maturity: number;
+}
+
+function compFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants): CompFeatures {
+  const age = ageDays(asOf, p.listed_at);
+  const rawGrowth = finite(p.change_7d, 0);
+  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
+  const ageForModel = age ?? V1.unknown_age_days;
+  return {
+    slug: p.slug,
+    category: p.category ?? 'Uncategorized',
+    tvl: p.tvl_usd,
+    mcap: p.mcap_usd!,
+    x: Math.log10(p.tvl_usd / 1e8),
+    y: Math.log10(p.mcap_usd!),
+    g: growthPct / 100,
+    logAge: Math.log10(ageForModel + 1),
+    logChains: Math.log10(Math.max(1, p.chains.length)),
+    listedAt: p.listed_at,
+    ageKnown: age !== null,
+    growthMult: 1 + (growthPct / 100) * V1.growth_weight,
+    maturity: V1.maturity_floor + (Math.min(Math.max(ageForModel, 0), V1.maturity_days) / V1.maturity_days) * V1.maturity_range,
+  };
+}
+
+/** A backtest specification: how it fits on training rows and predicts one row, in log10. */
+interface Spec {
+  name: string;
+  fit: (train: CompFeatures[]) => unknown;
+  predict: (fit: unknown, r: CompFeatures) => number;
+}
+
+function linearSpec(
+  name: string,
+  cols: (r: CompFeatures) => number[],
+  opts: { robust: boolean; familyK: number; slope: boolean; postGrowth: boolean },
+  model: ModelConstants,
+): Spec {
+  return {
+    name,
+    fit(train) {
+      const beta = huberFit(train, cols, (r) => r.y, model, opts.robust);
+      const off = new Map<string, number>();
+      if (opts.familyK > 0) {
+        const byCat = new Map<string, number[]>();
+        for (const r of train) {
+          const res = r.y - dot(cols(r), beta);
+          const list = byCat.get(r.category) ?? [];
+          list.push(res);
+          byCat.set(r.category, list);
+        }
+        for (const [cat, list] of byCat) {
+          const mean = list.reduce((a, b) => a + b, 0) / list.length;
+          off.set(cat, (list.length * mean) / (list.length + opts.familyK));
+        }
+      }
+      const slopes = new Map<string, { adj: number; mx: number }>();
+      if (opts.slope) {
+        const byCat = new Map<string, [number, number][]>();
+        for (const r of train) {
+          const res = r.y - dot(cols(r), beta) - (off.get(r.category) ?? 0);
+          const list = byCat.get(r.category) ?? [];
+          list.push([r.x, res]);
+          byCat.set(r.category, list);
+        }
+        for (const [cat, list] of byCat) {
+          if (list.length < 3) continue;
+          const mx = list.reduce((a, [x]) => a + x, 0) / list.length;
+          let num = 0;
+          let den = 0;
+          for (const [x, res] of list) {
+            num += (x - mx) * res;
+            den += (x - mx) ** 2;
+          }
+          if (den > 1e-9) slopes.set(cat, { adj: (list.length / (list.length + 5)) * (num / den), mx });
+        }
+      }
+      return { beta, off, slopes };
+    },
+    predict(f, r) {
+      const fit = f as { beta: number[]; off: Map<string, number>; slopes: Map<string, { adj: number; mx: number }> };
+      let v = dot(cols(r), fit.beta) + (fit.off.get(r.category) ?? 0);
+      const s = fit.slopes.get(r.category);
+      if (s) v += s.adj * (r.x - s.mx);
+      if (opts.postGrowth) v += Math.log10(1 + r.g * model.growth_weight);
+      return v;
+    },
+  };
+}
+
+/** The v1 method, scored blind: pooled medians recomputed without the held-out row. */
+function v1Spec(): Spec {
+  return {
+    name: 'Pooled median + growth + maturity (v1)',
+    fit: (train) => train,
+    predict(f, r) {
+      const train = f as CompFeatures[];
+      const global = median(train.map((p) => p.mcap / p.tvl));
+      const catRows = train.filter((p) => p.category === r.category);
+      const mult =
+        catRows.length === 0 ? global : (catRows.length * median(catRows.map((p) => p.mcap / p.tvl)) + V1.pool_weight * global) / (catRows.length + V1.pool_weight);
+      return Math.log10(Math.max(1, r.tvl * mult * r.growthMult * r.maturity));
+    },
+  };
+}
+
+function flatSpec(): Spec {
+  return {
+    name: 'Flat global median',
+    fit: (train) => median(train.map((p) => p.mcap / p.tvl)),
+    predict: (f, r) => Math.log10(Math.max(1, r.tvl * (f as number))),
+  };
+}
+
+function allSpecs(model: ModelConstants): Spec[] {
+  const size = (r: CompFeatures) => [1, r.x];
+  return [
+    v1Spec(),
+    flatSpec(),
+    linearSpec('Size curve, OLS', size, { robust: false, familyK: 0, slope: false, postGrowth: false }, model),
+    linearSpec('Size curve, robust', size, { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
+    linearSpec('Size curve, robust, x fixed growth (this radar)', size, { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('+ category offsets', size, { robust: true, familyK: 5, slope: false, postGrowth: true }, model),
+    linearSpec('+ fitted growth', (r) => [1, r.x, r.g], { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
+    linearSpec('+ fitted age', (r) => [1, r.x, r.logAge], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('+ chain count', (r) => [1, r.x, r.logChains], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('+ growth x size', (r) => [1, r.x, r.g, r.g * r.x], { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
+    linearSpec('+ per-category slopes', size, { robust: true, familyK: 0, slope: true, postGrowth: true }, model),
+    linearSpec('+ quadratic size', (r) => [1, r.x, r.x * r.x], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+  ];
+}
+
+interface SpecMetrics {
+  miss: number;
+  within3: number;
+}
+
+function specMetrics(errors: number[]): SpecMetrics {
+  const abs = errors.map(Math.abs);
+  return {
+    miss: 10 ** (abs.reduce((a, b) => a + b, 0) / abs.length),
+    within3: errors.filter((e) => Math.abs(e) < Math.log10(3)).length / errors.length,
+  };
+}
+
+/**
+ * The backtest: leave-one-out and a 70/30 time-split for every specification, and the
+ * uncertainty band calibrated from the final specification's own leave-one-out misses.
+ * Every fit inside a fold uses only that fold's training rows.
+ */
+export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): { backtest: BacktestData; fit: CurveFit; finalLooErrors: number[] } {
+  const comps = cleanComps(snapshot, model)
+    .map((p) => compFeatures(p, snapshot.as_of, model))
+    .sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const specs = allSpecs(model);
+  const dated = comps
+    .filter((c) => c.ageKnown)
+    .sort((a, b) => (a.listedAt! < b.listedAt! ? -1 : a.listedAt! > b.listedAt! ? 1 : a.slug < b.slug ? -1 : 1));
+  const cut = Math.floor(dated.length * 0.7);
+  const trainTs = dated.slice(0, cut);
+  const testTs = dated.slice(cut);
+
+  const rows: BacktestRow[] = [];
+  let finalLooErrors: number[] = [];
+  for (const spec of specs) {
+    const looErrors = comps.map((r, i) => spec.predict(spec.fit(comps.filter((_, j) => j !== i)), r) - r.y);
+    const tsFit = spec.fit(trainTs);
+    const tsErrors = testTs.map((r) => spec.predict(tsFit, r) - r.y);
+    const loo = specMetrics(looErrors);
+    const ts = specMetrics(tsErrors);
+    if (spec.name.includes('this radar')) finalLooErrors = looErrors;
+    rows.push({ name: spec.name, loo_miss: round4(loo.miss), loo_within3: round4(loo.within3), ts_miss: round4(ts.miss), ts_within3: round4(ts.within3) });
+  }
+  const absSorted = [...finalLooErrors].map(Math.abs).sort((a, b) => a - b);
+  const band80 = 10 ** quantileSorted(absSorted, model.band_quantile);
+  const band50 = 10 ** quantileSorted(absSorted, model.haircut_quantile);
+  const looSd = Math.sqrt(finalLooErrors.reduce((a, e) => a + e * e, 0) / finalLooErrors.length);
+  const beta = huberFit(comps, (r) => [1, r.x], (r) => r.y, model, true);
+  return {
+    backtest: {
+      rows,
+      loo_n: comps.length,
+      ts_train_n: trainTs.length,
+      ts_test_n: testTs.length,
+      ts_cutoff: dated[cut]!.listedAt!,
+      null_date_excluded: comps.length - dated.length,
+      band80: round4(band80),
+      band50: round4(band50),
+      loo_sd: round4(looSd),
+    },
+    fit: { intercept: beta[0]!, slope: beta[1]! },
+    finalLooErrors,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Scoring, verdicts, and farm plans.
+// ---------------------------------------------------------------------------
+
+/** The multipliers and the implied value one protocol gets under the fitted curve. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  benchmarks: { global: number; byCategory: Map<string, CompRow> },
+  fit: CurveFit,
   model: ModelConstants,
-): {
-  implied: number;
-  multiple: number;
-  compN: number;
-  compMedian: number | null;
-  source: 'pooled' | 'global';
-  growthPct: number;
-  growthMult: number;
-  maturityMult: number;
-  age: number | null;
-} {
+): { implied: number; curveValue: number; growthPct: number; growthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const { multiple, n, compMedian, source } = pooledMultiple(protocol.category, benchmarks);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult));
-  return { implied, multiple, compN: n, compMedian, source, growthPct, growthMult, maturityMult, age };
-}
-
-const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
-
-/** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
-export function stepText(step: FarmStep): string {
-  let s = `${step.text} Cost: ${step.cost}. Time: ${step.time}.`;
-  if (s.length > 600) s = `${s.slice(0, 596)}...`;
-  if (s.length < 20) s = `${s} Hold the position and check the protocol's own page.`;
-  return s;
+  const curveValue = 10 ** (fit.intercept + fit.slope * Math.log10(protocol.tvl_usd / 1e8));
+  const implied = Math.max(1, Math.round(curveValue * growthMult));
+  return { implied, curveValue: Math.round(curveValue), growthPct, growthMult, age };
 }
 
 /** The first chain a protocol names, or a neutral phrase. */
@@ -342,13 +626,50 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** What transactions cost on a chain, from the chain's own name: no fee schedule is hard-coded per protocol. */
+/** What transactions cost on a chain, in dollars, from the chain's own name. */
+export function gasNums(chain: string): { setup: number; weekly: number } {
+  const c = chain.toLowerCase();
+  if (c.includes('ethereum')) return { setup: 12, weekly: 4 };
+  if (c.includes('solana')) return { setup: 0.1, weekly: 0.1 };
+  if (c.includes('bitcoin')) return { setup: 3, weekly: 3 };
+  return { setup: 1, weekly: 1 };
+}
+
+/** What transactions cost on a chain, in words, from the chain's own name. */
 function gasFor(chain: string): { first: string; setup: string; weekly: string } {
   const c = chain.toLowerCase();
   if (c.includes('ethereum')) return { first: 'about $12 of gas for the first transaction', setup: 'about $12 of gas', weekly: 'about $4 of gas a week' };
   if (c.includes('solana')) return { first: 'under $0.10 of fees for the first transaction', setup: 'under $0.10 of fees', weekly: 'under $0.10 of fees a week' };
   if (c.includes('bitcoin')) return { first: 'about $3 of network fees for the first transaction', setup: 'about $3 of network fees', weekly: 'about $3 of network fees a week' };
   return { first: 'about $1 of gas for the first transaction', setup: 'about $1 of gas', weekly: 'under $1 of gas a week' };
+}
+
+/**
+ * The verdict in dollars: the expected gross of farming at the yardstick capital,
+ * minus gas and the hurdle, at the point estimate and after the typical-miss haircut.
+ * Thresholds use unrounded dollars; the stored figures are rounded to cents.
+ */
+export function verdictFor(
+  ratio: number,
+  holdDays: number,
+  gasTotal: number,
+  haircut: number,
+  opts: { capital: number; share: number; hurdle: number },
+): { gross: number; costs: number; net: number; netLow: number; verdict: Verdict } {
+  const gross = opts.capital * ratio * opts.share;
+  const costs = gasTotal + opts.capital * opts.hurdle * (holdDays / 365);
+  const net = gross - costs;
+  const netLow = gross / haircut - costs;
+  const verdict: Verdict = netLow > 0 ? 'FARM' : net > 0 ? 'THIN' : 'SKIP';
+  return { gross: round2(gross), costs: round2(costs), net: round2(net), netLow: round2(netLow), verdict };
+}
+
+/** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
+export function stepText(step: FarmStep): string {
+  let s = `${step.text} Cost: ${step.cost}. Time: ${step.time}.`;
+  if (s.length > 600) s = `${s.slice(0, 596)}...`;
+  if (s.length < 20) s = `${s} Hold the position and check the protocol's own page.`;
+  return s;
 }
 
 /** The category's main action, in the words a farmer can follow. */
@@ -409,18 +730,20 @@ function riskFor(p: SnapshotProtocol, chain: string): string {
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is
- * derived from the protocol's own record (category, chains, TVL, age), never from a
- * hand-written list of names. The dashboard's farmSteps is the same derivation.
+ * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan
+ * is derived from the protocol's own record (category, chains, TVL, age) and its
+ * verdict: a SKIP row farms a $10 test position only, and the first step states the
+ * verdict and the net dollars behind it. The dashboard's farmSteps is the same derivation.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, verdict: Verdict, netUsd: number, model: ModelConstants = MODEL): FarmStep[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
+  const capital = verdict === 'SKIP' ? 10 : capitalFor(p);
   const hold = holdDaysFor(age);
   const gas = gasFor(chain);
+  const netPhrase = netUsd < 0 ? `about -$${Math.abs(netUsd).toFixed(2)}` : `about $${netUsd.toFixed(2)}`;
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and open ${p.name} only from the link its own docs publish.`,
+      text: `Verdict ${verdict}: at the $${model.verdict_capital.toLocaleString('en-US')} yardstick this farm nets ${netPhrase} after gas and the ${Math.round(model.hurdle_rate * 100)}% hurdle. Use a fresh wallet that holds only the funds you plan to farm, and open ${p.name} only from the link its own docs publish.`,
       cost: gas.first,
       time: '10 minutes',
     },
@@ -458,12 +781,24 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const benchmarks = categoryMultiples(snapshot, model);
+export function buildBoard(
+  snapshot: Snapshot,
+  fit: CurveFit,
+  backtest: BacktestData,
+  model: ModelConstants = MODEL,
+): BoardRow[] {
   const chosen = snapshot.protocols.filter(isRankable);
   const scored = chosen.map((p) => {
-    const v = impliedValue(p, snapshot.as_of, benchmarks, model);
-    return { p, v };
+    const v = impliedValue(p, snapshot.as_of, fit, model);
+    const hold = holdDaysFor(v.age);
+    const gas = gasNums(chainOf(p));
+    const gasTotal = round2(gas.setup + gas.weekly * Math.ceil(hold / 7));
+    const verdict = verdictFor(v.implied / p.tvl_usd, hold, gasTotal, backtest.band50, {
+      capital: model.verdict_capital,
+      share: model.verdict_share,
+      hurdle: model.hurdle_rate,
+    });
+    return { p, v, hold, gasTotal, verdict };
   });
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -481,17 +816,21 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token',
     age_days: s.v.age,
     implied_value_usd: s.v.implied,
+    band_low_usd: Math.max(1, Math.round(s.v.implied / backtest.band80)),
+    band_high_usd: Math.round(s.v.implied * backtest.band80),
+    verdict: s.verdict.verdict,
+    net_usd: s.verdict.net,
     model: {
-      multiple: s.v.multiple,
-      comp_n: s.v.compN,
-      comp_median: s.v.compMedian,
-      multiple_source: s.v.source,
+      curve_value_usd: s.v.curveValue,
       growth_pct: s.v.growthPct,
       growth_multiplier: round4(s.v.growthMult),
-      maturity_multiplier: round4(s.v.maturityMult),
+      gross_usd: s.verdict.gross,
+      cost_usd: s.verdict.costs,
+      hold_days: s.hold,
+      gas_usd: s.gasTotal,
       age_days: s.v.age,
     },
-    farm_steps: farmSteps(s.p, s.v.age).map(stepText),
+    farm_steps: farmSteps(s.p, s.v.age, s.verdict.verdict, s.verdict.net, model).map(stepText),
   }));
 }
 
@@ -527,24 +866,37 @@ export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    multiple: row.model.multiple,
-    comp_n: row.model.comp_n,
-    comp_median: row.model.comp_median,
-    multiple_source: row.model.multiple_source,
-    watchlist,
+    band_low_usd: row.band_low_usd,
+    band_high_usd: row.band_high_usd,
+    verdict: row.verdict,
+    net_usd: row.net_usd,
+    curve_value_usd: row.model.curve_value_usd,
     growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
+    gross_usd: row.model.gross_usd,
+    cost_usd: row.model.cost_usd,
+    hold_days: row.model.hold_days,
+    gas_usd: row.model.gas_usd,
+    watchlist,
   };
 }
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const { backtest, fit } = runBacktest(snapshot, model);
+  const board = buildBoard(snapshot, fit, backtest, model);
   const live = liveRows(snapshot);
-  const benchmarks = categoryMultiples(snapshot, model);
   const watchSet = new Set(snapshot.watchlist);
   const beyond = board.filter((r) => !watchSet.has(r.slug)).length;
   const excluded = snapshot.protocols.filter((p) => isPreToken(p) && !isRankable(p)).length;
+  const fitComps: FitComp[] = cleanComps(snapshot, model)
+    .map((p) => {
+      const rawGrowth = finite(p.change_7d, 0);
+      const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
+      return { slug: p.slug, x: Math.log10(p.tvl_usd / 1e8), y: Math.log10(p.mcap_usd!), g: growthPct / 100 };
+    })
+    .sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const verdictCounts = { FARM: 0, THIN: 0, SKIP: 0 };
+  for (const r of board) verdictCounts[r.verdict]++;
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -556,11 +908,13 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     beyond_size: beyond,
     live_size: live.length,
     excluded_size: excluded,
-    clean_comps: benchmarks.clean,
-    global_median: benchmarks.global,
+    clean_comps: fitComps.length,
+    curve: fit,
+    backtest,
+    fit_comps: fitComps,
+    verdict_counts: verdictCounts,
     rows: board.map((r) => radarRow(r, watchSet.has(r.slug))),
     live,
-    comps: [...benchmarks.byCategory.values()],
   };
   return { board, radar };
 }
