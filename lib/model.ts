@@ -1,4 +1,4 @@
-// The token radar's model, version 4: one snapshot of the protocol universe in, one
+// The token radar's model, version 5: one snapshot of the protocol universe in, one
 // ranked board out.
 //
 // The board ranks every protocol the snapshot's own watchlist rule keeps when the $50M
@@ -11,29 +11,37 @@
 //
 // Implied value is priced off the market that already trades, by a size curve fitted
 // from this snapshot's own clean comps — the live-token protocols whose market-cap/TVL
-// ratio lies in [0.001, 10] (119 of 144 on this snapshot) — plus a fitted age term.
-// The regression is Huber-robust, so one runaway token cannot drag the line:
+// ratio lies in [0.001, 10] (119 of 144 on this snapshot). The regression is
+// Huber-robust, so one runaway token cannot drag the line:
 //
-//   log10(mcap) = a + b x log10(tvl_usd / $100M) + d x log1p(age_years)
-//   implied     = max(1, round(10^(a + b x) x growth x ageFactor))
-//
-// where age_years is the listing age in years at the snapshot's frozen as_of date, and
-// ageFactor is 10^(d x log1p(age_years)), capped to [0.5, 2]. All three coefficients
-// are fitted at run time from the same 119 comps; no age weight is chosen by hand.
-// A comp or row with no listing date is scored at one year, the convention the v1
-// maturity term used. The age term is a maturity proxy, stated honestly: a live
-// comp's age is the age of a protocol that already launched, while a pre-token row's
-// age is time spent running without a token, so the term can only proxy maturity,
-// never measure launch readiness directly.
+//   log10(mcap) = a + b x log10(tvl_usd / $100M)
+//   implied     = max(1, round(10^(a + b x) x growth))
 //
 // The growth factor is a fixed prior at weight 0.5, stated here, not a fitted
 // coefficient: the fitted growth weight is ~0 and the factor is out-of-sample neutral,
-// so it is kept only so seven-day momentum moves values. The age term's own ablation
-// is measured in the backtest this file runs at build time and the dashboard's Method
-// view reports: size-only, then +growth, then +age, with leave-one-out miss, median
-// miss and within-3x share. On this snapshot the fitted age weight is near zero and
-// the age step adds no leave-one-out gain; it is kept at its fitted weight, capped,
-// so the equation answers the age question from the data instead of omitting it.
+// so it is kept only so seven-day momentum moves values.
+//
+// Age was fitted, tested, and rejected — not omitted. Two age forms were measured
+// under the full protocol (leave-one-out on all 119 comps, a 70/30 time-split, a 50/50
+// time-split, and a paired bootstrap of 2000 resamples at a fixed seed): log1p of age
+// in years inside the same Huber regression, and a saturating maturity form whose tau
+// is chosen only on training rows, never on the data it is judged on. Both forms lose
+// on leave-one-out with bootstrap intervals that exclude zero on the worse side, and
+// both collapse on the time-splits, where the coefficient is barely identified on old
+// listings alone. So no age term enters the price: the equation above is the whole
+// model. The backtest this file runs at build time reports the age ablation and the
+// bootstrap intervals, and the dashboard's Method view states them, so the age
+// question is answered with measured numbers instead of a silent omission. Age still
+// sets each farm plan's hold window, and the age of every row is shown on the board.
+//
+// Missing data has fixed, stated fallbacks, and the program never crashes on a null:
+// a protocol with no listing date gets a neutral age feature (it would change no
+// value had the age term been applied), a null seven-day change scores as zero
+// growth, and a null category gets the generic farm action. Gas figures are labelled
+// estimates throughout: the snapshot carries no gas data, so no gas number is derived
+// from it. What the snapshot does set is each farm plan's position-size tier, from
+// the protocol's own TVL.
+//
 // Everything else the data was asked about and rejected — category offsets, fitted
 // growth, chain counts, per-category slopes, a quadratic size term — is measured in
 // the same backtest. The uncertainty band is the 80th percentile of the final
@@ -104,7 +112,7 @@ export const MODEL: ModelConstants = {
 const V1 = { pool_weight: 5, growth_weight: 0.5, growth_floor: -60, growth_cap: 120, maturity_floor: 0.6, maturity_range: 0.4, maturity_days: 1095, unknown_age_days: 365 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-4-age';
+export const MODEL_VERSION = 'radar-5-age-tested';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -115,31 +123,53 @@ export const EXCLUDED_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liqui
 /** Exchange names the watchlist rule refuses at the start of a protocol's name. */
 export const EXCHANGE_PREFIXES = ['Binance', 'Coinbase', 'Bybit', 'Kraken', 'Bitget', 'OKX', 'Bitfinex', 'Gemini'];
 
-/** A fitted size-plus-age curve: log10(mcap) = intercept + slope x log10(tvl / $100M) + ageCoef x log1p(age_years). */
+/** A fitted size curve: log10(mcap) = intercept + slope x log10(tvl / $100M). This is the price. */
 export interface CurveFit {
+  intercept: number;
+  slope: number;
+}
+
+/** The diagnostic age fit: the same regression with a log1p(age_years) column added. Fitted, never applied. */
+export interface AgeFit {
   intercept: number;
   slope: number;
   ageCoef: number;
 }
 
-/** One backtest row: a specification's out-of-sample misses, measured at build time. */
+/** One backtest row: a specification's out-of-sample misses, measured at build time. Split fields are null when the snapshot has too few dated comps to split. */
 export interface BacktestRow {
   name: string;
   loo_miss: number;
   loo_within3: number;
-  ts_miss: number;
-  ts_within3: number;
+  ts_miss: number | null;
+  ts_within3: number | null;
 }
 
-/** One ablation row: a nested specification's out-of-sample misses, size-only -> +growth -> +age. */
+/** One ablation row: a nested specification's misses under all three protocols. Split fields are null when the snapshot has too few dated comps to split. */
 export interface AblationRow {
   name: string;
   loo_miss: number;
   loo_median: number;
-  loo_within3: number;
-  ts_miss: number;
-  ts_median: number;
-  ts_within3: number;
+  ts70_miss: number | null;
+  ts50_miss: number | null;
+}
+
+/** A paired bootstrap interval for the mean |error| difference against the baseline, in log10 units. */
+export interface BootstrapCI {
+  diff_mean: number;
+  ci_lo: number;
+  ci_hi: number;
+  resamples: number;
+}
+
+/** The age investigation's numbers: both fitted forms, the would-be factors, and the bootstrap verdicts. */
+export interface AgeDiagnostic {
+  log1p: AgeFit;
+  saturating: { tau: number; intercept: number; slope: number; ageCoef: number };
+  factor_min: number;
+  factor_max: number;
+  bootstrap_log1p: BootstrapCI;
+  bootstrap_saturating: BootstrapCI;
 }
 
 /** The backtest: every specification measured, the age ablation, plus the band the misses calibrate. */
@@ -149,11 +179,15 @@ export interface BacktestData {
   loo_n: number;
   ts_train_n: number;
   ts_test_n: number;
-  ts_cutoff: string;
+  ts_cutoff: string | null;
+  ts50_train_n: number;
+  ts50_test_n: number;
+  ts50_cutoff: string | null;
   null_date_excluded: number;
   band80: number;
   band50: number;
   loo_sd: number;
+  diagnostic: AgeDiagnostic;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -190,7 +224,6 @@ export interface BoardRow {
     curve_value_usd: number;
     growth_pct: number;
     growth_multiplier: number;
-    age_multiplier: number;
     gross_usd: number;
     cost_usd: number;
     hold_days: number;
@@ -219,7 +252,6 @@ export interface RadarRow {
   net_usd: number;
   curve_value_usd: number;
   growth_multiplier: number;
-  age_multiplier: number;
   gross_usd: number;
   cost_usd: number;
   hold_days: number;
@@ -312,15 +344,21 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** Days with no listing date score as one year: the convention the v1 maturity term used. */
-export const UNKNOWN_AGE_DAYS = 365;
-
-/** The regression's age feature: log1p of age in years, saturating so old listings cannot dominate. */
+/**
+ * The regression's age feature: log1p of age in years, saturating so old listings
+ * cannot dominate. No listing date scores as 0, the neutral feature: the age factor
+ * for such a row is exactly 1.0, changing no value.
+ */
 export function ageFeature(age: number | null): number {
-  return Math.log1p((age ?? UNKNOWN_AGE_DAYS) / 365);
+  return age === null ? 0 : Math.log1p(age / 365);
 }
 
-/** The fitted age multiplier: 10^(ageCoef x age feature), capped to [0.5, 2] as a guard. */
+/** The saturating maturity feature at horizon tau days: 0 for a row with no listing date. */
+export function maturityFeature(age: number | null, tau: number): number {
+  return age === null ? 0 : 1 - Math.exp(-age / tau);
+}
+
+/** The fitted age multiplier: 10^(ageCoef x age feature), capped to [0.5, 2] as a guard. Diagnostic only. */
 export function ageFactor(age: number | null, ageCoef: number): number {
   const f = 10 ** (ageCoef * ageFeature(age));
   return Math.min(2, Math.max(0.5, f));
@@ -365,6 +403,7 @@ export function cleanComps(snapshot: Snapshot, model: ModelConstants = MODEL): S
 // ---------------------------------------------------------------------------
 
 /** Solve A x = b by Gaussian elimination with partial pivoting. */
+/** Gaussian elimination; a column with no pivot (an unidentified regressor) gets coefficient 0 instead of NaN. */
 function solveLinear(A: number[][], b: number[]): number[] {
   const n = b.length;
   const M = A.map((row, i) => [...row, b[i]!]);
@@ -379,7 +418,7 @@ function solveLinear(A: number[][], b: number[]): number[] {
       for (let c = col; c <= n; c++) M[r]![c]! -= f * M[row]![c]!;
     }
   }
-  return M.map((row, i) => row[n]! / row[i]!);
+  return M.map((row, i) => (Math.abs(row[i]!) < 1e-12 ? 0 : row[n]! / row[i]!));
 }
 
 /** Least squares for y ~ X, with optional weights. */
@@ -431,6 +470,7 @@ interface CompFeatures {
   y: number;
   g: number;
   z: number;
+  age: number | null;
   logChains: number;
   listedAt: string | null;
   ageKnown: boolean;
@@ -452,6 +492,7 @@ function compFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants):
     y: Math.log10(p.mcap_usd!),
     g: growthPct / 100,
     z: ageFeature(age),
+    age,
     logChains: Math.log10(Math.max(1, p.chains.length)),
     listedAt: p.listed_at,
     ageKnown: age !== null,
@@ -460,10 +501,50 @@ function compFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants):
   };
 }
 
-/** The final fit: Huber-robust regression of log10(mcap) on size and the age feature. */
-function maturityFit(rows: CompFeatures[], model: ModelConstants): CurveFit {
+/** The pricing fit: Huber-robust regression of log10(mcap) on size alone. */
+function sizeFit(rows: CompFeatures[], model: ModelConstants): CurveFit {
+  const beta = huberFit(rows, (r) => [1, r.x], (r) => r.y, model, true);
+  return { intercept: beta[0]!, slope: beta[1]! };
+}
+
+/** The diagnostic age fit: Huber-robust regression of log10(mcap) on size and the age feature. */
+function maturityFit(rows: CompFeatures[], model: ModelConstants): AgeFit {
   const beta = huberFit(rows, (r) => [1, r.x, r.z], (r) => r.y, model, true);
   return { intercept: beta[0]!, slope: beta[1]!, ageCoef: beta[2]! };
+}
+
+/** A fixed-seed generator, so the bootstrap is byte-identical on every run. */
+function mulberry32(seed: number): () => number {
+  return () => {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Paired bootstrap of the mean |error| difference between two specifications'
+ * leave-one-out errors, in log10 units: negative means the first is better. 2000
+ * resamples at the fixed seed 20261115, the same protocol the v2 investigation used.
+ */
+function pairedBootstrap(errsA: number[], errsB: number[], resamples = 2000): BootstrapCI {
+  const diffs = errsA.map((e, i) => Math.abs(e) - Math.abs(errsB[i]!));
+  const rnd = mulberry32(20261115);
+  const means: number[] = [];
+  for (let k = 0; k < resamples; k++) {
+    let s = 0;
+    for (let i = 0; i < diffs.length; i++) s += diffs[Math.floor(rnd() * diffs.length)]!;
+    means.push(s / diffs.length);
+  }
+  means.sort((a, b) => a - b);
+  return {
+    diff_mean: round4(diffs.reduce((a, b) => a + b, 0) / diffs.length),
+    ci_lo: round4(means[Math.floor(0.025 * resamples)]!),
+    ci_hi: round4(means[Math.floor(0.975 * resamples)]!),
+    resamples,
+  };
 }
 
 /** A backtest specification: how it fits on training rows and predicts one row, in log10. */
@@ -562,8 +643,8 @@ function allSpecs(model: ModelConstants): Spec[] {
     flatSpec(),
     linearSpec('Size curve, OLS', size, { robust: false, familyK: 0, slope: false, postGrowth: false }, model),
     linearSpec('Size curve, robust', size, { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
-    linearSpec('Size curve, robust, x fixed growth', size, { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
-    linearSpec('Size + fitted age, x fixed growth (this radar)', (r) => [1, r.x, r.z], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('Size curve, robust, x fixed growth (this radar)', size, { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('Size + fitted age (log1p)', (r) => [1, r.x, r.z], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
     linearSpec('+ category offsets', size, { robust: true, familyK: 5, slope: false, postGrowth: true }, model),
     linearSpec('+ fitted growth', (r) => [1, r.x, r.g], { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
     linearSpec('+ chain count', (r) => [1, r.x, r.logChains], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
@@ -586,16 +667,81 @@ function specMetrics(errors: number[]): SpecMetrics {
   };
 }
 
+/** The saturating age form's horizon grid, in days. Tau is never chosen on the data it is judged on. */
+const TAU_GRID = [60, 90, 180, 365, 730, 1095, 1825, 3650];
+
+/** Huber fit of y ~ [1, x, maturity(age, tau)]. */
+function saturatingFit(train: CompFeatures[], tau: number, model: ModelConstants): number[] {
+  return huberFit(train, (r) => [1, r.x, maturityFeature(r.age, tau)], (r) => r.y, model, true);
+}
+
+/** One saturating prediction, in log10, with the fixed growth factor applied after the fit. */
+function saturatingPredict(beta: number[], tau: number, r: CompFeatures, model: ModelConstants): number {
+  return dot([1, r.x, maturityFeature(r.age, tau)], beta) + Math.log10(1 + r.g * model.growth_weight);
+}
+
+/** Mean |error| of a saturating fit on a row set, for tau selection. */
+function saturatingMiss(rows: CompFeatures[], tau: number, model: ModelConstants, predictRows: CompFeatures[]): number {
+  const beta = saturatingFit(rows, tau, model);
+  return predictRows.reduce((s, r) => s + Math.abs(r.y - saturatingPredict(beta, tau, r, model)), 0) / predictRows.length;
+}
+
 /**
- * The backtest: leave-one-out and a 70/30 time-split for every specification, the
- * nested ablation (size-only -> +growth -> +age) with median misses, and the
- * uncertainty band calibrated from the final specification's own leave-one-out misses.
- * Every fit inside a fold uses only that fold's training rows. The time-split trains
- * on the oldest listings and tests the newest, so it splits on the very variable the
- * age term fits: an age coefficient is barely identified on old listings alone, and
- * the split's age number reads that confounding, not the age term's live accuracy.
- * Leave-one-out, which holds out one comp at a time from the full age range, is the
- * age model's honest out-of-sample read.
+ * Tau by 5-fold cross-validation inside one row set: folds are positions mod 5 in
+ * slug order, so the choice is deterministic and uses no row outside the set.
+ */
+function selectTauCV5(rows: CompFeatures[], model: ModelConstants): number {
+  let best = TAU_GRID[0]!;
+  let bestMiss = Infinity;
+  for (const tau of TAU_GRID) {
+    let s = 0;
+    for (let f = 0; f < 5; f++) {
+      const test = rows.filter((_, i) => i % 5 === f);
+      const train = rows.filter((_, i) => i % 5 !== f);
+      s += saturatingMiss(train, tau, model, test) * test.length;
+    }
+    const miss = s / rows.length;
+    if (miss < bestMiss) {
+      bestMiss = miss;
+      best = tau;
+    }
+  }
+  return best;
+}
+
+/** Tau by leave-one-out inside one row set: the honest choice for a time-split's training rows. */
+function selectTauLOO(rows: CompFeatures[], model: ModelConstants): number {
+  let best = TAU_GRID[0]!;
+  let bestMiss = Infinity;
+  for (const tau of TAU_GRID) {
+    let s = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const train = rows.filter((_, j) => j !== i);
+      s += Math.abs(rows[i]!.y - saturatingPredict(saturatingFit(train, tau, model), tau, rows[i]!, model));
+    }
+    const miss = s / rows.length;
+    if (miss < bestMiss) {
+      bestMiss = miss;
+      best = tau;
+    }
+  }
+  return best;
+}
+
+/**
+ * The backtest: leave-one-out and two time-splits (70/30 and 50/50) for every
+ * specification, the nested ablation (size-only -> +growth -> +age, both age forms)
+ * under all three protocols, and the uncertainty band calibrated from the final
+ * specification's own leave-one-out misses. Every fit inside a fold uses only that
+ * fold's training rows. The saturating form's tau is chosen by cross-validation on
+ * training rows only, never on the data it is judged on: choosing tau from the same
+ * leave-one-out run it is then evaluated on would be circular, and the time-splits
+ * choose it from their training rows alone. The time-splits train on the oldest
+ * listings and test the newest, so they split on the very variable the age terms fit:
+ * an age coefficient is barely identified on old listings alone, which is why the
+ * age numbers on the splits read that confounding as well as the terms' accuracy.
+ * The paired bootstrap intervals settle the leave-one-out comparison: an interval
+ * that excludes zero on the worse side is a decisive rejection.
  */
 export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): { backtest: BacktestData; fit: CurveFit; finalLooErrors: number[] } {
   const comps = cleanComps(snapshot, model)
@@ -605,57 +751,112 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
   const dated = comps
     .filter((c) => c.ageKnown)
     .sort((a, b) => (a.listedAt! < b.listedAt! ? -1 : a.listedAt! > b.listedAt! ? 1 : a.slug < b.slug ? -1 : 1));
-  const cut = Math.floor(dated.length * 0.7);
-  const trainTs = dated.slice(0, cut);
-  const testTs = dated.slice(cut);
+  const cut70 = Math.floor(dated.length * 0.7);
+  const train70 = dated.slice(0, cut70);
+  const test70 = dated.slice(cut70);
+  const cut50 = Math.floor(dated.length * 0.5);
+  const train50 = dated.slice(0, cut50);
+  const test50 = dated.slice(cut50);
+  // Time-splits need enough dated comps for a train and a test set; below eight,
+  // the split fields stay null and the page shows n/a instead of a fabricated
+  // number. Leave-one-out, the fits and the board never need a listing date.
+  const splitsOk = dated.length >= 8;
 
   const rows: BacktestRow[] = [];
-  const ablationByName = new Map<string, AblationRow>();
+  const ablationErrs = new Map<string, { loo: number[]; ts70: number[] | null; ts50: number[] | null }>();
   const ablationNames: Record<string, string> = {
     'Size curve, robust': 'Size only',
-    'Size curve, robust, x fixed growth': 'Size + growth',
-    'Size + fitted age, x fixed growth (this radar)': 'Size + growth + fitted age',
+    'Size curve, robust, x fixed growth (this radar)': 'Size + growth',
+    'Size + fitted age (log1p)': 'Size + growth + fitted age',
   };
   let finalLooErrors: number[] = [];
+  let baselineLoo: number[] = [];
+  let log1pLoo: number[] = [];
   for (const spec of specs) {
     const looErrors = comps.map((r, i) => spec.predict(spec.fit(comps.filter((_, j) => j !== i)), r) - r.y);
-    const tsFit = spec.fit(trainTs);
-    const tsErrors = testTs.map((r) => spec.predict(tsFit, r) - r.y);
+    const fit70 = splitsOk ? spec.fit(train70) : null;
+    const fit50 = splitsOk ? spec.fit(train50) : null;
+    const ts70Errors = splitsOk ? test70.map((r) => spec.predict(fit70, r) - r.y) : null;
+    const ts50Errors = splitsOk ? test50.map((r) => spec.predict(fit50, r) - r.y) : null;
     const loo = specMetrics(looErrors);
-    const ts = specMetrics(tsErrors);
-    if (spec.name.includes('this radar')) finalLooErrors = looErrors;
-    const ablationName = ablationNames[spec.name];
-    if (ablationName !== undefined) {
-      ablationByName.set(ablationName, {
-        name: ablationName,
-        loo_miss: round4(loo.miss),
-        loo_median: round4(10 ** median(looErrors.map(Math.abs))),
-        loo_within3: round4(loo.within3),
-        ts_miss: round4(ts.miss),
-        ts_median: round4(10 ** median(tsErrors.map(Math.abs))),
-        ts_within3: round4(ts.within3),
-      });
+    const ts = ts70Errors === null ? null : specMetrics(ts70Errors);
+    if (spec.name.includes('this radar')) {
+      finalLooErrors = looErrors;
+      baselineLoo = looErrors;
     }
-    rows.push({ name: spec.name, loo_miss: round4(loo.miss), loo_within3: round4(loo.within3), ts_miss: round4(ts.miss), ts_within3: round4(ts.within3) });
+    if (spec.name === 'Size + fitted age (log1p)') log1pLoo = looErrors;
+    const ablationName = ablationNames[spec.name];
+    if (ablationName !== undefined) ablationErrs.set(ablationName, { loo: looErrors, ts70: ts70Errors, ts50: ts50Errors });
+    rows.push({
+      name: spec.name,
+      loo_miss: round4(loo.miss),
+      loo_within3: round4(loo.within3),
+      ts_miss: ts === null ? null : round4(ts.miss),
+      ts_within3: ts === null ? null : round4(ts.within3),
+    });
   }
-  const ablation = ['Size only', 'Size + growth', 'Size + growth + fitted age'].map((n) => ablationByName.get(n)!);
+
+  // The saturating form, with tau selected honestly: nested 5-fold choice inside
+  // each leave-one-out fold, and inner leave-one-out choice on each split's
+  // training rows. No evaluated row ever votes for its own tau.
+  const satLoo: number[] = comps.map((r, i) => {
+    const train = comps.filter((_, j) => j !== i);
+    const tau = selectTauCV5(train, model);
+    return saturatingPredict(saturatingFit(train, tau, model), tau, r, model) - r.y;
+  });
+  const tau70 = splitsOk ? selectTauLOO(train70, model) : TAU_GRID[0]!;
+  const satTs70 = splitsOk ? test70.map((r) => saturatingPredict(saturatingFit(train70, tau70, model), tau70, r, model) - r.y) : null;
+  const tau50 = splitsOk ? selectTauLOO(train50, model) : TAU_GRID[0]!;
+  const satTs50 = splitsOk ? test50.map((r) => saturatingPredict(saturatingFit(train50, tau50, model), tau50, r, model) - r.y) : null;
+  ablationErrs.set('Size + growth + saturating age', { loo: satLoo, ts70: satTs70, ts50: satTs50 });
+
+  const ablation = ['Size only', 'Size + growth', 'Size + growth + fitted age', 'Size + growth + saturating age'].map((n) => {
+    const e = ablationErrs.get(n)!;
+    return {
+      name: n,
+      loo_miss: round4(specMetrics(e.loo).miss),
+      loo_median: round4(10 ** median(e.loo.map(Math.abs))),
+      ts70_miss: e.ts70 === null ? null : round4(specMetrics(e.ts70).miss),
+      ts50_miss: e.ts50 === null ? null : round4(specMetrics(e.ts50).miss),
+    };
+  });
+
+  // The diagnostic full fits and the would-be age factors, for the Method view.
+  const log1pFit = maturityFit(comps, model);
+  const tauFull = selectTauCV5(comps, model);
+  const satBeta = saturatingFit(comps, tauFull, model);
+  const boardRows = snapshot.protocols.filter((p) => isPreToken(p) && isRankable(p));
+  const factors = boardRows.map((p) => ageFactor(ageDays(snapshot.as_of, p.listed_at), log1pFit.ageCoef));
+  const diagnostic: AgeDiagnostic = {
+    log1p: log1pFit,
+    saturating: { tau: tauFull, intercept: round4(satBeta[0]!), slope: round4(satBeta[1]!), ageCoef: round4(satBeta[2]!) },
+    factor_min: round4(Math.min(...factors)),
+    factor_max: round4(Math.max(...factors)),
+    bootstrap_log1p: pairedBootstrap(log1pLoo, baselineLoo),
+    bootstrap_saturating: pairedBootstrap(satLoo, baselineLoo),
+  };
+
   const absSorted = [...finalLooErrors].map(Math.abs).sort((a, b) => a - b);
   const band80 = 10 ** quantileSorted(absSorted, model.band_quantile);
   const band50 = 10 ** quantileSorted(absSorted, model.haircut_quantile);
   const looSd = Math.sqrt(finalLooErrors.reduce((a, e) => a + e * e, 0) / finalLooErrors.length);
-  const fit = maturityFit(comps, model);
+  const fit = sizeFit(comps, model);
   return {
     backtest: {
       rows,
       ablation,
       loo_n: comps.length,
-      ts_train_n: trainTs.length,
-      ts_test_n: testTs.length,
-      ts_cutoff: dated[cut]!.listedAt!,
+      ts_train_n: train70.length,
+      ts_test_n: test70.length,
+      ts_cutoff: splitsOk ? dated[cut70]!.listedAt! : null,
+      ts50_train_n: train50.length,
+      ts50_test_n: test50.length,
+      ts50_cutoff: splitsOk ? dated[cut50]!.listedAt! : null,
       null_date_excluded: comps.length - dated.length,
       band80: round4(band80),
       band50: round4(band50),
       loo_sd: round4(looSd),
+      diagnostic,
     },
     fit,
     finalLooErrors,
@@ -672,15 +873,14 @@ export function impliedValue(
   asOf: string,
   fit: CurveFit,
   model: ModelConstants,
-): { implied: number; curveValue: number; growthPct: number; growthMult: number; ageMult: number; age: number | null } {
+): { implied: number; curveValue: number; growthPct: number; growthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageMult = ageFactor(age, fit.ageCoef);
   const curveValue = 10 ** (fit.intercept + fit.slope * Math.log10(protocol.tvl_usd / 1e8));
-  const implied = Math.max(1, Math.min(100_000_000_000_000, Math.round(curveValue * growthMult * ageMult)));
-  return { implied, curveValue: Math.round(curveValue), growthPct, growthMult, ageMult, age };
+  const implied = Math.max(1, Math.min(100_000_000_000_000, Math.round(curveValue * growthMult)));
+  return { implied, curveValue: Math.round(curveValue), growthPct, growthMult, age };
 }
 
 /** The first chain a protocol names, or a neutral phrase. */
@@ -704,7 +904,7 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** What transactions cost on a chain, in dollars, from the chain's own name. */
+/** What transactions cost on a chain, in dollars: ESTIMATES, not snapshot data — the snapshot carries no gas figures. */
 export function gasNums(chain: string): { setup: number; weekly: number } {
   const c = chain.toLowerCase();
   if (c.includes('ethereum')) return { setup: 12, weekly: 4 };
@@ -713,13 +913,13 @@ export function gasNums(chain: string): { setup: number; weekly: number } {
   return { setup: 1, weekly: 1 };
 }
 
-/** What transactions cost on a chain, in words, from the chain's own name. */
+/** What transactions cost on a chain, in words: every figure is labelled an estimate, never snapshot-derived. */
 function gasFor(chain: string): { first: string; setup: string; weekly: string } {
   const c = chain.toLowerCase();
-  if (c.includes('ethereum')) return { first: 'about $12 of gas for the first transaction', setup: 'about $12 of gas', weekly: 'about $4 of gas a week' };
-  if (c.includes('solana')) return { first: 'under $0.10 of fees for the first transaction', setup: 'under $0.10 of fees', weekly: 'under $0.10 of fees a week' };
-  if (c.includes('bitcoin')) return { first: 'about $3 of network fees for the first transaction', setup: 'about $3 of network fees', weekly: 'about $3 of network fees a week' };
-  return { first: 'about $1 of gas for the first transaction', setup: 'about $1 of gas', weekly: 'under $1 of gas a week' };
+  if (c.includes('ethereum')) return { first: 'est. $12 of gas for the first transaction', setup: 'est. $12 of gas', weekly: 'est. $4 of gas a week' };
+  if (c.includes('solana')) return { first: '~$0.10 of fees for the first transaction', setup: '~$0.10 of fees', weekly: '~$0.10 of fees a week' };
+  if (c.includes('bitcoin')) return { first: 'est. $3 of network fees for the first transaction', setup: 'est. $3 of network fees', weekly: 'est. $3 of network fees a week' };
+  return { first: 'est. $1 of gas for the first transaction', setup: 'est. $1 of gas', weekly: 'est. under $1 of gas a week' };
 }
 
 /**
@@ -917,7 +1117,6 @@ export function buildBoard(
       curve_value_usd: s.v.curveValue,
       growth_pct: s.v.growthPct,
       growth_multiplier: round4(s.v.growthMult),
-      age_multiplier: round4(s.v.ageMult),
       gross_usd: s.verdict.gross,
       cost_usd: s.verdict.costs,
       hold_days: s.hold,
@@ -966,7 +1165,6 @@ export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
     net_usd: row.net_usd,
     curve_value_usd: row.model.curve_value_usd,
     growth_multiplier: row.model.growth_multiplier,
-    age_multiplier: row.model.age_multiplier,
     gross_usd: row.model.gross_usd,
     cost_usd: row.model.cost_usd,
     hold_days: row.model.hold_days,

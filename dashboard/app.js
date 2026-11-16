@@ -1,14 +1,14 @@
 // Token Radar: 198 protocols not recorded as having a token (40 watchlist + 158
-// beyond), ranked by an implied value from a Huber-robust fit over 119 live-token
-// comps: log10(mcap) = a + b*log10(TVL/$100M) + d*log1p(age_years), all fitted at
-// run time. The Method view carries the fitted numbers, the ablation (size-only,
-// then +growth, then +age) and the 80% band; 144 wrapped/staked/bridged/exchange
-// protocols are set aside by the watchlist rule, never ranked. No network: every
-// byte shown is in data.js. The model lives here too, in the same arithmetic
-// main.ts runs: maturityFit refits the curve, ageFactor is the fitted age
-// multiplier, impliedOf is size curve x growth x age, looBand rebuilds the band,
-// verdictOf nets dollars at the yardstick, farmSteps derives each plan. No
-// protocol name is special-cased.
+// beyond), ranked by an implied value from a Huber-robust size curve fitted over
+// 119 live-token comps: log10(mcap) = a + b*log10(TVL/$100M), fitted at run time.
+// Age was fitted, tested under three protocols, and rejected; the Method view
+// carries the ablation and the bootstrap intervals. 144 wrapped/staked/bridged/
+// exchange protocols are set aside by the watchlist rule, never ranked. No
+// network: every byte shown is in data.js. The model lives here too, in the same
+// arithmetic main.ts runs: fitCurve refits the curve, maturityFit refits the
+// diagnostic age fit, impliedOf is size curve x growth, looBand rebuilds the
+// band, verdictOf nets dollars at the yardstick, farmSteps derives each plan.
+// No protocol name is special-cased.
 (function () {
   'use strict';
 
@@ -43,6 +43,12 @@
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
     return n.toFixed(2) + 'x';
   }
+  function fmtMiss(v) {
+    if (v === null || v === undefined || !isFinite(v)) return 'n/a';
+    if (v >= 1000) return 'x' + (v / 1e6).toFixed(2) + 'M';
+    if (v >= 100) return 'x' + Math.round(v);
+    return 'x' + v.toFixed(2);
+  }
   function median(values) {
     var s = values.slice().sort(function (a, b) { return a - b; });
     var mid = Math.floor(s.length / 2);
@@ -74,7 +80,7 @@
         for (var c = col; c <= n; c++) M[r][c] -= f * M[row][c];
       }
     }
-    return M.map(function (row, i) { return row[n] / row[i]; });
+    return M.map(function (row, i) { return Math.abs(row[i]) < 1e-12 ? 0 : row[n] / row[i]; });
   }
   function ols(X, y, weights) {
     var k = X[0].length;
@@ -108,23 +114,19 @@
     }
     return beta;
   }
-  // maturityFit: the size-plus-age fit, refit in the page; the third column is log1p(age in years).
+  // sizeFit: the pricing fit, refit in the page; maturityFit is the diagnostic
+  // age fit, refit only to verify the diagnostic numbers the build reports.
+  function sizeFit(rows) {
+    var beta = huberFit(rows, function (r) { return [1, r.x]; });
+    return { intercept: beta[0], slope: beta[1] };
+  }
   function maturityFit(rows) {
     var beta = huberFit(rows, function (r) { return [1, r.x, r.a]; });
     return { intercept: beta[0], slope: beta[1], ageCoef: beta[2] };
   }
-  function fitCurve() { return maturityFit(DATA.fit_comps); }
+  function fitCurve() { return sizeFit(DATA.fit_comps); }
 
-  // ageFactor: the fitted age multiplier, capped to [0.5, 2]; no listing date scores as one year.
-  function ageFeature(days) {
-    var d = days === null || days === undefined ? 365 : days;
-    return Math.log1p(d / 365);
-  }
-  function ageFactor(days, coef) {
-    return Math.min(2, Math.max(0.5, Math.pow(10, coef * ageFeature(days))));
-  }
-
-  // impliedOf: curve value from TVL, times the fixed growth factor, times the fitted age factor.
+  // impliedOf: curve value from TVL, times the fixed growth factor. No age term.
   function curveValueOf(row, fit) {
     return Math.pow(10, fit.intercept + fit.slope * Math.log10(row.tvl_usd / 1e8));
   }
@@ -135,7 +137,7 @@
     return 1 + (growthPct / 100) * m.growth_weight;
   }
   function impliedOf(row) {
-    return Math.max(1, Math.min(1e14, Math.round(curveValueOf(row, DATA.curve) * growthMultOf(row) * ageFactor(row.age_days, DATA.curve.ageCoef))));
+    return Math.max(1, Math.min(1e14, Math.round(curveValueOf(row, DATA.curve) * growthMultOf(row))));
   }
 
   // looBand: hold each comp out, refit without it, record the miss; the band is the
@@ -145,8 +147,8 @@
     var errs = [];
     for (var i = 0; i < comps.length; i++) {
       var train = comps.filter(function (c, j) { return j !== i; });
-      var fit = maturityFit(train);
-      var pred = fit.intercept + fit.slope * comps[i].x + fit.ageCoef * comps[i].a + Math.log10(1 + comps[i].g * DATA.model.growth_weight);
+      var fit = sizeFit(train);
+      var pred = fit.intercept + fit.slope * comps[i].x + Math.log10(1 + comps[i].g * DATA.model.growth_weight);
       errs.push(Math.abs(pred - comps[i].y));
     }
     errs.sort(function (a, b) { return a - b; });
@@ -209,10 +211,10 @@
   }
   function gasFor(chain) {
     var c = chain.toLowerCase();
-    if (c.indexOf('ethereum') >= 0) return { first: 'about $12 of gas for the first transaction', setup: 'about $12 of gas', weekly: 'about $4 of gas a week' };
-    if (c.indexOf('solana') >= 0) return { first: 'under $0.10 of fees for the first transaction', setup: 'under $0.10 of fees', weekly: 'under $0.10 of fees a week' };
-    if (c.indexOf('bitcoin') >= 0) return { first: 'about $3 of network fees for the first transaction', setup: 'about $3 of network fees', weekly: 'about $3 of network fees a week' };
-    return { first: 'about $1 of gas for the first transaction', setup: 'about $1 of gas', weekly: 'under $1 of gas a week' };
+    if (c.indexOf('ethereum') >= 0) return { first: 'est. $12 of gas for the first transaction', setup: 'est. $12 of gas', weekly: 'est. $4 of gas a week' };
+    if (c.indexOf('solana') >= 0) return { first: '~$0.10 of fees for the first transaction', setup: '~$0.10 of fees', weekly: '~$0.10 of fees a week' };
+    if (c.indexOf('bitcoin') >= 0) return { first: 'est. $3 of network fees for the first transaction', setup: 'est. $3 of network fees', weekly: 'est. $3 of network fees a week' };
+    return { first: 'est. $1 of gas for the first transaction', setup: 'est. $1 of gas', weekly: 'est. under $1 of gas a week' };
   }
   function actionFor(p, capital, chain) {
     var c = (p.category || '').toLowerCase();
@@ -377,7 +379,7 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.board_size + ' pre-token protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and not recorded as having a token. The radar lifts the floor and ranks ' + DATA.beyond_size + ' more by the same rule. Each value comes from a size curve with a fitted age term, fitted to the tokens that already trade, with an uncertainty band; each verdict nets the farm in dollars after gas and a hurdle. Implied value is a model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and not recorded as having a token. The radar lifts the floor and ranks ' + DATA.beyond_size + ' more by the same rule. Each value comes from a size curve, fitted to the tokens that already trade, with an uncertainty band; each verdict nets the farm in dollars after gas and a hurdle. Implied value is a model, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -540,8 +542,11 @@
     var m = DATA.model;
     var b = DATA.backtest;
     var refit = fitCurve();
+    var diag = maturityFit(DATA.fit_comps);
+    var dg = b.diagnostic;
     var band = looBand();
-    var coefOk = Math.abs(refit.intercept - DATA.curve.intercept) < 1e-9 && Math.abs(refit.slope - DATA.curve.slope) < 1e-9 && Math.abs(refit.ageCoef - DATA.curve.ageCoef) < 1e-9;
+    var coefOk = Math.abs(refit.intercept - DATA.curve.intercept) < 1e-9 && Math.abs(refit.slope - DATA.curve.slope) < 1e-9;
+    var diagOk = Math.abs(diag.intercept - dg.log1p.intercept) < 1e-9 && Math.abs(diag.slope - dg.log1p.slope) < 1e-9 && Math.abs(diag.ageCoef - dg.log1p.ageCoef) < 1e-9;
     var bandOk = Math.abs(band.band80 - b.band80) < 1e-4 && Math.abs(band.band50 - b.band50) < 1e-4;
     var tbody = el('tbody');
     b.rows.forEach(function (r) {
@@ -550,8 +555,8 @@
         el('td', null, el('b', { text: r.name })),
         el('td', { class: 'num', text: 'x' + r.loo_miss.toFixed(2) }),
         el('td', { class: 'num', text: (r.loo_within3 * 100).toFixed(0) + '%' }),
-        el('td', { class: 'num', text: 'x' + r.ts_miss.toFixed(2) }),
-        el('td', { class: 'num', text: (r.ts_within3 * 100).toFixed(0) + '%' })
+        el('td', { class: 'num', text: fmtMiss(r.ts_miss) }),
+        el('td', { class: 'num', text: r.ts_within3 === null ? 'n/a' : (r.ts_within3 * 100).toFixed(0) + '%' })
       ));
     });
     var v1 = backtestRow('(v1)');
@@ -559,33 +564,32 @@
     var gro = backtestRow('fitted growth');
     var fam = backtestRow('category offsets');
     var ab = b.ablation;
-    var ageMin = Math.min.apply(null, DATA.rows.map(function (r) { return r.age_multiplier; }));
-    var ageMax = Math.max.apply(null, DATA.rows.map(function (r) { return r.age_multiplier; }));
     var counts = verdictCounts();
     var atbody = el('tbody');
     ab.forEach(function (r) {
       atbody.appendChild(el('tr', null,
         el('td', null, el('b', { text: r.name })),
-        el('td', { class: 'num', text: 'x' + r.loo_miss.toFixed(2) }),
-        el('td', { class: 'num', text: 'x' + r.loo_median.toFixed(2) }),
-        el('td', { class: 'num', text: (r.loo_within3 * 100).toFixed(0) + '%' }),
-        el('td', { class: 'num', text: 'x' + r.ts_miss.toFixed(2) })
+        el('td', { class: 'num', text: fmtMiss(r.loo_miss) }),
+        el('td', { class: 'num', text: fmtMiss(r.loo_median) }),
+        el('td', { class: 'num', text: fmtMiss(r.ts70_miss) }),
+        el('td', { class: 'num', text: fmtMiss(r.ts50_miss) })
       ));
     });
     return el('div', null,
       el('section', { class: 'panel model' },
-        el('h2', { text: 'The size curve, with a fitted age term' }),
-        el('p', { class: 'sub', text: 'Market caps grow slower than TVL: a protocol ten times larger is not worth ten times more. The radar fits that law from the ' + DATA.clean_comps + ' clean comps — live-token protocols whose market-cap/TVL ratio lies between ' + m.ratio_min + ' and ' + m.ratio_max + ' — by Huber-robust regression, so one runaway token cannot drag the line. Age enters the same regression, as log1p of age in years at the frozen snapshot date. No name is special-cased and no coefficient is carried over: the fit runs again on whatever snapshot it is given.' }),
-        el('div', { class: 'formula', text: 'log10(mcap) = ' + DATA.curve.intercept.toFixed(4) + ' + ' + DATA.curve.slope.toFixed(4) + ' x log10(TVL / $100M)' + (DATA.curve.ageCoef < 0 ? ' - ' : ' + ') + Math.abs(DATA.curve.ageCoef).toFixed(4) + ' x log1p(age_years)' }),
-        el('div', { class: 'formula', text: 'implied = round( size-curve value x growth x ageFactor ),  ageFactor = 10^(d x log1p(age_years)), capped to [0.5, 2]' }),
-        el('p', { class: 'sub', text: 'The growth factor is a fixed prior at weight ' + m.growth_weight + ', stated here, not a fitted coefficient: the fitted growth weight is near zero and the factor is out-of-sample neutral, so it is kept only so seven-day momentum moves values. The age weight d = ' + DATA.curve.ageCoef.toFixed(4) + ' is fitted, not chosen: the ablation below shows the age step adds no leave-one-out gain (x' + ab[2].loo_miss.toFixed(2) + ' against x' + ab[1].loo_miss.toFixed(2) + ' without it), so the data prices age near zero — age factors on this board run ' + ageMin.toFixed(3) + 'x to ' + ageMax.toFixed(3) + 'x — and the term stays at that fitted weight, capped, so the equation answers age from the snapshot instead of omitting it. Age is a maturity proxy: a comp\'s age is time since listing for a protocol that already launched, while a pre-token row\'s age is time running without a token. No listing date scores as one year old.' }),
-        el('p', { class: 'check', text: 'Refit check: this page refits the curve from the comps it carries and gets intercept ' + refit.intercept.toFixed(4) + ', slope ' + refit.slope.toFixed(4) + ', age weight ' + refit.ageCoef.toFixed(4) + ' — ' + (coefOk ? 'the same coefficients the board was built with.' : 'DIFFERENT from the board: the data would be stale.') + ' The page rebuilds the band the same way and gets x' + band.band80.toFixed(2) + ' / x' + band.band50.toFixed(2) + ' — ' + (bandOk ? 'the same band.' : 'DIFFERENT from the board.') })
+        el('h2', { text: 'The size curve' }),
+        el('p', { class: 'sub', text: 'Market caps grow slower than TVL: a protocol ten times larger is not worth ten times more. The radar fits that law from the ' + DATA.clean_comps + ' clean comps — live-token protocols whose market-cap/TVL ratio lies between ' + m.ratio_min + ' and ' + m.ratio_max + ' — by Huber-robust regression, so one runaway token cannot drag the line. No name is special-cased and no coefficient is carried over: the fit runs again on whatever snapshot it is given.' }),
+        el('div', { class: 'formula', text: 'log10(mcap) = ' + DATA.curve.intercept.toFixed(4) + ' + ' + DATA.curve.slope.toFixed(4) + ' x log10(TVL / $100M)' }),
+        el('div', { class: 'formula', text: 'implied = round( size-curve value x growth )' }),
+        el('p', { class: 'sub', text: 'The growth factor is a fixed prior at weight ' + m.growth_weight + ', stated here, not a fitted coefficient: the fitted growth weight is near zero and the factor is out-of-sample neutral, so it is kept only so seven-day momentum moves values.' }),
+        el('p', { class: 'sub', text: 'Age was fitted, tested and rejected: adding log1p(age in years) to the regression fits a weight of d = ' + dg.log1p.ageCoef.toFixed(4) + ' (had it been applied, age factors would run ' + dg.factor_min.toFixed(3) + 'x to ' + dg.factor_max.toFixed(3) + 'x) but misses worse on every protocol. A paired bootstrap of ' + dg.bootstrap_log1p.resamples + ' resamples puts its mean |error| change at ' + (dg.bootstrap_log1p.diff_mean >= 0 ? '+' : '') + dg.bootstrap_log1p.diff_mean.toFixed(4) + ', 95% CI [' + dg.bootstrap_log1p.ci_lo.toFixed(4) + ', ' + dg.bootstrap_log1p.ci_hi.toFixed(4) + '] — worse, significantly. A saturating maturity form, horizon ' + dg.saturating.tau + ' days chosen on training rows only, is likewise worse: ' + (dg.bootstrap_saturating.diff_mean >= 0 ? '+' : '') + dg.bootstrap_saturating.diff_mean.toFixed(4) + ' [' + dg.bootstrap_saturating.ci_lo.toFixed(4) + ', ' + dg.bootstrap_saturating.ci_hi.toFixed(4) + ']. So no age term is in the price. The splits train on the oldest listings only, where age barely varies, so an age coefficient is barely identified there; the bootstrap on leave-one-out settles the question.' }),
+        el('p', { class: 'check', text: 'Refit check: this page refits the curve from the comps it carries and gets intercept ' + refit.intercept.toFixed(4) + ', slope ' + refit.slope.toFixed(4) + ' — ' + (coefOk ? 'the same coefficients the board was built with.' : 'DIFFERENT from the board: the data would be stale.') + ' It also refits the diagnostic age fit and gets age weight ' + diag.ageCoef.toFixed(4) + ' — ' + (diagOk ? 'the same as the build reports.' : 'DIFFERENT from the build.') + ' The page rebuilds the band the same way and gets x' + band.band80.toFixed(2) + ' / x' + band.band50.toFixed(2) + ' — ' + (bandOk ? 'the same band.' : 'DIFFERENT from the board.') })
       ),
       el('div', { class: 'panel', style: 'margin-top:16px' },
         el('div', { class: 'table-wrap' },
           el('table', null,
-            el('caption', { text: 'Ablation: each row adds one term, measured out of sample on the ' + b.loo_n + ' clean comps; the final row\'s 80% band is x' + b.band80.toFixed(2) + '. The age row\'s time-split number is confounded — the split trains on the oldest listings only, where age barely varies; leave-one-out is the honest read on age.' }),
-            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Specification' }), el('th', { scope: 'col', text: 'LOO miss' }), el('th', { scope: 'col', text: 'LOO median' }), el('th', { scope: 'col', text: 'LOO within 3x' }), el('th', { scope: 'col', text: 'Time-split miss' }))),
+            el('caption', { text: 'Ablation: each row adds one term, measured out of sample on the ' + b.loo_n + ' clean comps under three protocols: leave-one-out, a 70/30 time-split (fit ' + b.ts_train_n + ' oldest, test ' + b.ts_test_n + ' newest) and a 50/50 time-split (fit ' + b.ts50_train_n + ', test ' + b.ts50_test_n + '). The saturating row\'s horizon is chosen on training rows only. Miss is the geometric mean fold-error; lower is better.' }),
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Specification' }), el('th', { scope: 'col', text: 'LOO miss' }), el('th', { scope: 'col', text: 'LOO median' }), el('th', { scope: 'col', text: 'TS70 miss' }), el('th', { scope: 'col', text: 'TS50 miss' }))),
             atbody
           )
         )
@@ -593,7 +597,7 @@
       el('div', { class: 'panel', style: 'margin-top:16px' },
         el('div', { class: 'table-wrap' },
           el('table', null,
-            el('caption', { text: 'Out-of-sample misses on the clean comps. Leave-one-out holds each comp out in turn and refits without it; the time-split fits the ' + b.ts_train_n + ' oldest listings and tests the ' + b.ts_test_n + ' newest (cutoff ' + b.ts_cutoff + '; ' + b.null_date_excluded + ' comps without a listing date are excluded from the split only). Miss is the geometric mean fold-error; lower is better.' }),
+            el('caption', { text: 'Out-of-sample misses on the clean comps. Leave-one-out holds each comp out in turn and refits without it; the 70/30 time-split fits the ' + b.ts_train_n + ' oldest listings and tests the ' + b.ts_test_n + ' newest (cutoff ' + (b.ts_cutoff || 'no dated comps') + '; ' + b.null_date_excluded + ' comps without a listing date are excluded from the split only). Miss is the geometric mean fold-error; lower is better.' }),
             el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Specification' }), el('th', { scope: 'col', text: 'LOO miss' }), el('th', { scope: 'col', text: 'LOO within 3x' }), el('th', { scope: 'col', text: 'Time-split miss' }), el('th', { scope: 'col', text: 'Time-split within 3x' }))),
             tbody
           )
@@ -601,16 +605,17 @@
       ),
       el('section', { class: 'panel model', style: 'margin-top:16px' },
         el('h2', { text: 'What was tested and left out' }),
-        el('p', { class: 'sub', text: 'The curve beats the pooled-median method out of sample: leave-one-out x' + v1.loo_miss.toFixed(2) + ' to x' + fin.loo_miss.toFixed(2) + ', and the size-only curve beats it on the time-split too (x' + v1.ts_miss.toFixed(2) + ' to x' + ab[0].ts_miss.toFixed(2) + '); the final row\'s time-split number carries the age confounding the ablation caption explains. Every addition below was tested one at a time against the curve and adopted only on a clear out-of-sample gain. Later passes tested blends with the median method, sibling counts, shrunken category offsets, a piecewise curve, a restricted comp universe, other loss functions, recency weights, chain indicators and name signals the same way. None cleared the bar, so none is in the price:' }),
+        el('p', { class: 'sub', text: 'The curve beats the pooled-median method out of sample: leave-one-out x' + v1.loo_miss.toFixed(2) + ' to x' + fin.loo_miss.toFixed(2) + ', and on the time-split too (' + fmtMiss(v1.ts_miss) + ' to ' + fmtMiss(fin.ts_miss) + '). Every addition below was tested one at a time against the curve and adopted only on a clear out-of-sample gain. Later passes tested blends with the median method, sibling counts, shrunken category offsets, a piecewise curve, a restricted comp universe, other loss functions, recency weights, chain indicators and name signals the same way. None cleared the bar, so none is in the price:' }),
         el('div', { class: 'method' },
-          el('div', null, el('b', { text: 'Category offsets' }), el('span', { text: 'LOO x' + fam.loo_miss.toFixed(2) + ' but time-split x' + fam.ts_miss.toFixed(2) + ' — the leave-one-out edge does not survive a paired comparison, the time-split is worse, and the offsets reshuffle the board without evidence.' })),
+          el('div', null, el('b', { text: 'Category offsets' }), el('span', { text: 'LOO x' + fam.loo_miss.toFixed(2) + ' but time-split ' + fmtMiss(fam.ts_miss) + ' — the leave-one-out edge does not survive a paired comparison, the time-split is worse, and the offsets reshuffle the board without evidence.' })),
           el('div', null, el('b', { text: 'Fitted growth' }), el('span', { text: 'The fitted growth weight is near zero and the fitted-growth row misses worse out of sample (LOO x' + gro.loo_miss.toFixed(2) + '). Growth stays a fixed prior, stated above.' })),
-          el('div', null, el('b', { text: 'Other age forms' }), el('span', { text: 'Saturating maturity curves, capped age, median imputation and ridge-shrunk age weights were fitted the same way; none beat the plain log1p age term out of sample.' })),
+          el('div', null, el('b', { text: 'Age forms' }), el('span', { text: 'The ablation above carries both fitted age forms; both lose on every protocol, significantly on leave-one-out. Age sets each farm plan\'s hold window, never the price.' })),
           el('div', null, el('b', { text: 'Chains, slopes, curvature' }), el('span', { text: 'Chain counts, per-category slopes, a growth-by-size interaction and a quadratic size term all miss worse out of sample. The table above carries their numbers.' }))
         ),
         el('h2', { text: 'The band and the verdict', style: 'margin-top:20px' }),
         el('p', { class: 'sub', text: 'The 80% band is x' + b.band80.toFixed(2) + ': the 80th percentile of the final model\'s own leave-one-out misses, so four out of five traded comps land inside it. The verdict haircut is x' + b.band50.toFixed(2) + ', the median miss. Bands this wide are the honest state of launch pricing.' }),
-        el('p', { class: 'sub', text: 'The verdict nets dollars at the yardstick: capital $' + state.capital.toLocaleString('en-US') + ', a ' + state.share + '% farmer share of implied value paid pro-rata to TVL, gas for the first chain over the hold (60 days when under 6 months old, 45 when under a year, 30 otherwise), and a ' + state.hurdle + '% yearly hurdle. Gross minus costs is the net; FARM clears the hurdle even after the typical-miss haircut, THIN clears it at the point estimate, SKIP clears neither. At the current levers: ' + counts.FARM + ' FARM, ' + counts.THIN + ' THIN, ' + counts.SKIP + ' SKIP. Move the levers to test your own size — the board, the counts and the detail views recompute.' }),
+        el('p', { class: 'sub', text: 'The verdict nets dollars at the yardstick: capital $' + state.capital.toLocaleString('en-US') + ', a ' + state.share + '% farmer share of implied value paid pro-rata to TVL, gas for the first chain over the hold (60 days when under 6 months old, 45 when under a year, 30 otherwise), and a ' + state.hurdle + '% yearly hurdle. Gross minus costs is the net; FARM clears the hurdle even after the typical-miss haircut, THIN clears it at the point estimate, SKIP clears neither. At the current levers: ' + counts.FARM + ' FARM, ' + counts.THIN + ' THIN, ' + counts.SKIP + ' SKIP. Move the levers to test your own size — the board, the counts and the detail views recompute. Gas figures are estimates: the snapshot carries no gas data, so no gas number is derived from it; only the farm plan\'s position-size tier comes from the snapshot, from each protocol\'s TVL.' }),
+        el('p', { class: 'sub', text: 'Missing data: a protocol with no listing date gets a neutral age feature and shows its age as unknown; a null seven-day change scores as zero growth; a null category gets the generic farm action. The program never crashes on a null.' }),
         el('p', { class: 'sub', text: DATA.excluded_size + ' protocols not recorded as having a token are set aside by the watchlist rule itself: excluded categories (bridges, liquid staking, exchanges), versioned pool names, wrapped or staked names, and exchange-named products. They are not launches waiting to happen, so the radar does not rank them.' })
       )
     );
@@ -619,9 +624,9 @@
   function readingPanel() {
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How to read this board' }),
-      el('p', { class: 'sub', text: 'Every value comes from one size curve with a fitted age term, fitted to the tokens that already trade — the same code ranks a future snapshot, and no protocol name is special-cased. The band beside each value is the model\'s own uncertainty interval; the verdict nets the farm in dollars after gas and a hurdle. The Method view carries the fitted curve, the backtests, what was tested and left out, and the verdict assumptions in full.' }),
+      el('p', { class: 'sub', text: 'Every value comes from one size curve, fitted to the tokens that already trade — the same code ranks a future snapshot, and no protocol name is special-cased. The band beside each value is the model\'s own uncertainty interval; the verdict nets the farm in dollars after gas and a hurdle. The Method view carries the fitted curve, the backtests, what was tested and left out, and the verdict assumptions in full.' }),
       el('div', { class: 'method' },
-        el('div', null, el('b', { text: 'Priced off the traded market' }), el('span', { text: 'The curve and its age term are fitted from live-token comps in this snapshot, not from a multiple carried over or a name list.' })),
+        el('div', null, el('b', { text: 'Priced off the traded market' }), el('span', { text: 'The curve is fitted from live-token comps in this snapshot, not from a multiple carried over or a name list.' })),
         el('div', null, el('b', { text: 'Bands, not false precision' }), el('span', { text: 'Launch pricing is uncertain by multiples. The band says how uncertain, from the model\'s own misses.' })),
         el('div', null, el('b', { text: 'Verdicts in dollars' }), el('span', { text: 'A verdict is expected net dollars after gas and the hurdle — move the yardstick levers to test your own size.' }))
       )
@@ -668,9 +673,8 @@
         el('div', null, el('span', { text: 'Size-curve value' }), el('b', { class: 'num', text: fmtUsd(row.curve_value_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: growthText })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
-        el('div', null, el('span', { text: 'Age' }), el('b', { class: 'num', text: fmtAge(row.age_days) + (row.listed_at ? '' : ' (no listing date: scored as 1y)') })),
-        el('div', null, el('span', { text: 'Age multiplier' }), el('b', { class: 'num', text: row.age_multiplier.toFixed(4) + 'x' })),
-        el('div', { class: 'total' }, el('span', { text: 'Implied value = curve x growth x age' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'Age' }), el('b', { class: 'num', text: fmtAge(row.age_days) + (row.listed_at ? '' : ' (no listing date: age unknown)') })),
+        el('div', { class: 'total' }, el('span', { text: 'Implied value = curve x growth' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
         el('div', null, el('span', { text: '80% band' }), el('b', { class: 'num', text: fmtUsd(row.band_low_usd) + ' – ' + fmtUsd(row.band_high_usd) }))
       ),
       el('p', { class: 'check', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' See the Method view. This is an estimate, not a price.' })
@@ -680,7 +684,7 @@
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'Yardstick' }), el('b', { class: 'num', text: '$' + state.capital.toLocaleString('en-US') + ' for ' + row.hold_days + ' days, ' + state.share + '% farmer share' })),
         el('div', null, el('span', { text: 'Expected gross' }), el('b', { class: 'num', text: fmtMoney(v.gross) })),
-        el('div', null, el('span', { text: 'Gas on ' + chainOf(row) }), el('b', { class: 'num', text: fmtMoney(row.gas_usd) })),
+        el('div', null, el('span', { text: 'Gas on ' + chainOf(row) + ' (est.)' }), el('b', { class: 'num', text: fmtMoney(row.gas_usd) })),
         el('div', null, el('span', { text: 'Hurdle cost (' + state.hurdle + '%/yr)' }), el('b', { class: 'num', text: fmtMoney(hurdleCost) })),
         el('div', { class: 'total' }, el('span', { text: 'Net' }), el('b', { class: 'num', text: fmtMoney(v.net) })),
         el('div', null, el('span', { text: 'Net after typical-miss haircut' }), el('b', { class: 'num', text: fmtMoney(v.netLow) })),
@@ -722,7 +726,7 @@
   }
 
   // Verification hook for headless checks: the page's own model functions.
-  window.__RADAR_CHECK = { impliedOf: impliedOf, farmSteps: farmSteps, verdictOf: verdictOf, fitCurve: fitCurve, maturityFit: maturityFit, ageFactor: ageFactor, looBand: looBand, ageDays: ageDays, data: DATA };
+  window.__RADAR_CHECK = { impliedOf: impliedOf, farmSteps: farmSteps, verdictOf: verdictOf, fitCurve: fitCurve, maturityFit: maturityFit, looBand: looBand, ageDays: ageDays, data: DATA };
 
   readHash();
   render();
