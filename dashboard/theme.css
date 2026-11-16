@@ -1,39 +1,16 @@
-/* Token Radar's theme: warm paper, deep ink, one teal accent, one amber highlight.
-   The palette, two radii and two families are the whole style; everything else is
-   spacing, a hairline and a type step. No network: no imported font, no image. */
+/* Token Radar's theme: warm paper, deep ink, one teal accent, one amber highlight. No network. */
 :root {
-  --canvas: #f6f4ef;
-  --surface: #ffffff;
-  --ink: #15202e;
-  --ink-soft: #243447;
-  --muted: #5d6b7a;
-  --border: #dde1e0;
-  --accent: #0e6b5c;
-  --accent-soft: #e3efec;
-  --highlight: #c47a12;
-  --negative: #b23b2e;
-  --radius-control: 8px;
-  --radius-panel: 14px;
+  --canvas: #f6f4ef; --surface: #ffffff; --ink: #15202e; --ink-soft: #243447;
+  --muted: #5d6b7a; --border: #dde1e0; --accent: #0e6b5c; --accent-soft: #e3efec;
+  --highlight: #c47a12; --negative: #b23b2e;
+  --radius-control: 8px; --radius-panel: 14px;
   --font-body: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --step-1: 4px;
-  --step-2: 8px;
-  --step-3: 12px;
-  --step-4: 16px;
-  --step-5: 24px;
-  --step-6: 32px;
-  --step-7: 48px;
+  --step-1: 4px; --step-2: 8px; --step-3: 12px; --step-4: 16px; --step-5: 24px; --step-6: 32px; --step-7: 48px;
 }
-
 * { box-sizing: border-box; }
 html { color-scheme: light; }
-body {
-  margin: 0;
-  background: var(--canvas);
-  color: var(--ink);
-  font: 400 15px/1.5 var(--font-body);
-  text-wrap: pretty;
-}
+body { margin: 0; background: var(--canvas); color: var(--ink); font: 400 15px/1.5 var(--font-body); text-wrap: pretty; }
 h1, h2, h3 { margin: 0; letter-spacing: -0.02em; text-wrap: balance; }
 h1 { font-size: 31px; line-height: 1.15; font-weight: 650; }
 h2 { font-size: 20px; line-height: 1.2; font-weight: 650; }
@@ -41,20 +18,13 @@ h3 { font-size: 16px; line-height: 1.25; font-weight: 650; }
 p { margin: 0; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
-.skip {
-  position: absolute; left: -9999px; top: 0; padding: var(--step-2) var(--step-4);
-  background: var(--surface); border: 1px solid var(--border); z-index: 20;
-}
+.skip { position: absolute; left: -9999px; top: 0; padding: var(--step-2) var(--step-4); background: var(--surface); border: 1px solid var(--border); z-index: 20; }
 .skip:focus { left: var(--step-4); top: var(--step-4); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .noscript { padding: var(--step-5); }
-
 .shell { max-width: 1340px; margin: 0 auto; padding: 0 var(--step-6) var(--step-7); }
 .topbar { background: var(--ink); color: #f2f0ea; }
-.topbar-inner {
-  max-width: 1340px; margin: 0 auto; padding: var(--step-4) var(--step-6);
-  display: flex; align-items: center; justify-content: space-between; gap: var(--step-5);
-}
+.topbar-inner { max-width: 1340px; margin: 0 auto; padding: var(--step-4) var(--step-6); display: flex; align-items: center; justify-content: space-between; gap: var(--step-5); }
 .brand { display: flex; align-items: center; gap: var(--step-3); }
 .mark { width: 12px; height: 12px; border-radius: 50%; background: var(--highlight); flex: none; box-shadow: 0 0 0 4px rgba(196, 122, 18, 0.25); }
 .brand-name { font-family: var(--font-num); font-size: 15px; letter-spacing: 0.04em; font-weight: 600; }
@@ -62,26 +32,17 @@ button { cursor: pointer; }
 .top-meta { display: flex; flex-wrap: wrap; gap: var(--step-3); justify-content: flex-end; color: #b9c2cc; font-size: 13px; }
 .top-meta span { white-space: nowrap; }
 .top-meta b { color: #f2f0ea; font-weight: 600; }
-
 .lede { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(300px, 0.7fr); gap: var(--step-6); padding: var(--step-6) 0 var(--step-5); }
 .lede p { color: var(--muted); max-width: 64ch; margin-top: var(--step-2); }
-.formula {
-  margin-top: var(--step-3); padding: var(--step-3) var(--step-4); background: var(--surface);
-  border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-control);
-  font-family: var(--font-num); font-size: 12.5px; line-height: 1.7; color: var(--ink-soft); overflow-wrap: anywhere;
-}
+.formula { margin-top: var(--step-3); padding: var(--step-3) var(--step-4); background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-control); font-family: var(--font-num); font-size: 12.5px; line-height: 1.7; color: var(--ink-soft); overflow-wrap: anywhere; }
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: var(--step-2); align-content: start; }
 .fact { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--step-3) var(--step-4); display: grid; gap: 2px; }
 .fact span { color: var(--muted); font-size: 12px; }
 .fact b { font-family: var(--font-num); font-size: 17px; font-weight: 600; }
-
 .controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--step-3); padding: var(--step-4) 0; border-top: 1px solid var(--border); }
 .field { display: grid; gap: var(--step-1); }
 .field label, .field .lbl { color: var(--muted); font-size: 12px; }
-.field input, .field select {
-  min-height: 36px; padding: 0 var(--step-3); border: 1px solid var(--border); border-radius: var(--radius-control);
-  background: var(--surface); min-width: 170px;
-}
+.field input, .field select { min-height: 36px; padding: 0 var(--step-3); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); min-width: 170px; }
 .field input { min-width: 260px; }
 .toggle { display: inline-flex; align-items: center; gap: var(--step-2); min-height: 36px; padding: 0 var(--step-3); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); }
 .toggle[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--surface); }
@@ -89,7 +50,6 @@ button { cursor: pointer; }
 .tabs button { min-height: 30px; padding: 0 var(--step-3); border: 0; border-radius: 6px; background: transparent; color: var(--muted); white-space: nowrap; }
 .tabs button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
 .count { margin-left: auto; color: var(--muted); font-size: 13px; align-self: center; }
-
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); overflow: hidden; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -114,12 +74,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .bar { width: 110px; height: 6px; border-radius: 3px; background: #ece9e2; overflow: hidden; flex: none; }
 .bar i { display: block; height: 100%; background: var(--highlight); }
 .implied { display: flex; align-items: center; gap: var(--step-2); }
-.mult { display: grid; gap: 1px; }
-.mult .num { font-size: 14px; }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .status.live::before { background: var(--highlight); }
-
 .model { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
 .model h2 { margin-bottom: 2px; }
 .model .formula { margin-top: 0; }
@@ -132,12 +89,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .button { min-height: 36px; padding: 0 var(--step-4); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); }
 .button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 .foot { margin-top: var(--step-5); color: var(--muted); font-size: 12.5px; line-height: 1.6; display: grid; gap: var(--step-1); }
-
-.detail {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 94vw); z-index: 10;
-  background: var(--surface); border-left: 1px solid var(--border); padding: var(--step-5);
-  overflow-y: auto; margin: 0 0 0 auto; max-height: 100%;
-}
+.detail { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 94vw); z-index: 10; background: var(--surface); border-left: 1px solid var(--border); padding: var(--step-5); overflow-y: auto; margin: 0 0 0 auto; max-height: 100%; }
 .detail::backdrop { background: rgba(21, 32, 46, 0.32); }
 .detail-head { display: flex; align-items: start; justify-content: space-between; gap: var(--step-4); }
 .detail-head > div { min-width: 0; }
@@ -158,9 +110,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .steps li { padding-left: var(--step-1); }
 .steps b { display: block; font-weight: 550; line-height: 1.5; }
 .cost { color: var(--muted); font-size: 12px; font-family: var(--font-num); }
-
-/* Verdicts and the yardstick (v2): badges per verdict, lever inputs, the final
-   backtest row, and the band line under each implied value. */
+/* Verdict badges, lever inputs, the final backtest row. */
 .controls.yardstick { border-top: 0; padding-top: 0; align-items: end; }
 .controls > .lbl { color: var(--muted); font-size: 12px; align-self: center; }
 .controls.yardstick .sub { align-self: center; }
@@ -174,7 +124,6 @@ tr.final-row { background: var(--accent-soft); }
 tr.final-row:hover { background: var(--accent-soft); }
 .implied { display: grid; grid-template-columns: 110px max-content; align-items: center; gap: 2px var(--step-2); }
 .implied .sub { grid-column: 1 / -1; }
-
 @media (max-width: 900px) {
   .shell, .topbar-inner { padding-left: var(--step-4); padding-right: var(--step-4); }
   .lede { grid-template-columns: 1fr; gap: var(--step-4); }

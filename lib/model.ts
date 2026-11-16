@@ -1,29 +1,44 @@
-// The token radar's model, version 3: one snapshot of the protocol universe in, one
+// The token radar's model, version 4: one snapshot of the protocol universe in, one
 // ranked board out.
 //
 // The board ranks every protocol the snapshot's own watchlist rule keeps when the $50M
-// floor is lifted: it records no token, and it is not a wrapped, staked or bridged
-// product, a versioned pool or an exchange product. On this snapshot that is 198 rows:
-// the 40 watchlist protocols plus 158 beyond it. Nothing is hand-picked and no protocol
-// name is ever special-cased: the same rule scores every row, so a future snapshot with
-// protocols that do not exist yet is ranked by the same code.
+// floor is lifted: it is not recorded as having a token, and it is not a wrapped,
+// staked or bridged product, a versioned pool or an exchange product. On this snapshot
+// that is 198 rows: the 40 watchlist protocols plus 158 beyond it. Nothing is
+// hand-picked and no protocol name is ever special-cased: the same rule scores every
+// row, so a future snapshot with protocols that do not exist yet is ranked by the same
+// code.
 //
 // Implied value is priced off the market that already trades, by a size curve fitted
 // from this snapshot's own clean comps — the live-token protocols whose market-cap/TVL
-// ratio lies in [0.001, 10] (119 of 144 on this snapshot). The curve is a Huber-robust
-// regression of log market cap on log TVL, so one runaway token cannot drag the line:
+// ratio lies in [0.001, 10] (119 of 144 on this snapshot) — plus a fitted age term.
+// The regression is Huber-robust, so one runaway token cannot drag the line:
 //
-//   log10(mcap) = a + b x log10(tvl_usd / $100M)          (a, b fitted at run time)
-//   implied     = max(1, round(10^(a + b x) x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)))
+//   log10(mcap) = a + b x log10(tvl_usd / $100M) + d x log1p(age_years)
+//   implied     = max(1, round(10^(a + b x) x growth x ageFactor))
+//
+// where age_years is the listing age in years at the snapshot's frozen as_of date, and
+// ageFactor is 10^(d x log1p(age_years)), capped to [0.5, 2]. All three coefficients
+// are fitted at run time from the same 119 comps; no age weight is chosen by hand.
+// A comp or row with no listing date is scored at one year, the convention the v1
+// maturity term used. The age term is a maturity proxy, stated honestly: a live
+// comp's age is the age of a protocol that already launched, while a pre-token row's
+// age is time spent running without a token, so the term can only proxy maturity,
+// never measure launch readiness directly.
 //
 // The growth factor is a fixed prior at weight 0.5, stated here, not a fitted
 // coefficient: the fitted growth weight is ~0 and the factor is out-of-sample neutral,
-// so it is kept only so seven-day momentum moves values. Everything else the data was
-// asked about and rejected — category offsets, fitted growth, fitted age, chain counts,
-// per-category slopes, a quadratic size term — is measured in the backtest this file
-// runs at build time and the dashboard's Method view reports. The uncertainty band is
-// the 80th percentile of the final model's own leave-one-out misses, recomputed from
-// the snapshot at run time; the verdict haircut is its median miss.
+// so it is kept only so seven-day momentum moves values. The age term's own ablation
+// is measured in the backtest this file runs at build time and the dashboard's Method
+// view reports: size-only, then +growth, then +age, with leave-one-out miss, median
+// miss and within-3x share. On this snapshot the fitted age weight is near zero and
+// the age step adds no leave-one-out gain; it is kept at its fitted weight, capped,
+// so the equation answers the age question from the data instead of omitting it.
+// Everything else the data was asked about and rejected — category offsets, fitted
+// growth, chain counts, per-category slopes, a quadratic size term — is measured in
+// the same backtest. The uncertainty band is the 80th percentile of the final
+// model's own leave-one-out misses, recomputed from the snapshot at run time; the
+// verdict haircut is its median miss.
 //
 // Each row also carries a verdict in dollars: the expected net of farming it at a
 // $1,000 yardstick, after gas and a 4% hurdle, against the value the curve implies.
@@ -89,7 +104,7 @@ export const MODEL: ModelConstants = {
 const V1 = { pool_weight: 5, growth_weight: 0.5, growth_floor: -60, growth_cap: 120, maturity_floor: 0.6, maturity_range: 0.4, maturity_days: 1095, unknown_age_days: 365 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-3-curve';
+export const MODEL_VERSION = 'radar-4-age';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -100,10 +115,11 @@ export const EXCLUDED_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liqui
 /** Exchange names the watchlist rule refuses at the start of a protocol's name. */
 export const EXCHANGE_PREFIXES = ['Binance', 'Coinbase', 'Bybit', 'Kraken', 'Bitget', 'OKX', 'Bitfinex', 'Gemini'];
 
-/** A fitted size curve: log10(mcap) = intercept + slope x log10(tvl / $100M). */
+/** A fitted size-plus-age curve: log10(mcap) = intercept + slope x log10(tvl / $100M) + ageCoef x log1p(age_years). */
 export interface CurveFit {
   intercept: number;
   slope: number;
+  ageCoef: number;
 }
 
 /** One backtest row: a specification's out-of-sample misses, measured at build time. */
@@ -115,9 +131,21 @@ export interface BacktestRow {
   ts_within3: number;
 }
 
-/** The backtest: every specification measured, plus the band the misses calibrate. */
+/** One ablation row: a nested specification's out-of-sample misses, size-only -> +growth -> +age. */
+export interface AblationRow {
+  name: string;
+  loo_miss: number;
+  loo_median: number;
+  loo_within3: number;
+  ts_miss: number;
+  ts_median: number;
+  ts_within3: number;
+}
+
+/** The backtest: every specification measured, the age ablation, plus the band the misses calibrate. */
 export interface BacktestData {
   rows: BacktestRow[];
+  ablation: AblationRow[];
   loo_n: number;
   ts_train_n: number;
   ts_test_n: number;
@@ -162,6 +190,7 @@ export interface BoardRow {
     curve_value_usd: number;
     growth_pct: number;
     growth_multiplier: number;
+    age_multiplier: number;
     gross_usd: number;
     cost_usd: number;
     hold_days: number;
@@ -190,6 +219,7 @@ export interface RadarRow {
   net_usd: number;
   curve_value_usd: number;
   growth_multiplier: number;
+  age_multiplier: number;
   gross_usd: number;
   cost_usd: number;
   hold_days: number;
@@ -209,12 +239,13 @@ export interface LiveRow {
   ratio: number | null;
 }
 
-/** One clean comp, reduced to the three numbers the page's refit needs. */
+/** One clean comp, reduced to the numbers the page's refit needs: size, value, growth, age. */
 export interface FitComp {
   slug: string;
   x: number;
   y: number;
   g: number;
+  a: number;
 }
 
 /** Everything the dashboard needs: the board, the live set, the curve, and the backtest. */
@@ -281,13 +312,27 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
+/** Days with no listing date score as one year: the convention the v1 maturity term used. */
+export const UNKNOWN_AGE_DAYS = 365;
+
+/** The regression's age feature: log1p of age in years, saturating so old listings cannot dominate. */
+export function ageFeature(age: number | null): number {
+  return Math.log1p((age ?? UNKNOWN_AGE_DAYS) / 365);
+}
+
+/** The fitted age multiplier: 10^(ageCoef x age feature), capped to [0.5, 2] as a guard. */
+export function ageFactor(age: number | null, ageCoef: number): number {
+  const f = 10 ** (ageCoef * ageFeature(age));
+  return Math.min(2, Math.max(0.5, f));
+}
+
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
 /** A whole word wrapped, staked or staking anywhere in a name, in any case. */
 const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
 
-/** Whether a protocol records no token at all. */
+/** Whether a protocol is not recorded as having a token at all. */
 export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
@@ -385,7 +430,7 @@ interface CompFeatures {
   x: number;
   y: number;
   g: number;
-  logAge: number;
+  z: number;
   logChains: number;
   listedAt: string | null;
   ageKnown: boolean;
@@ -406,13 +451,19 @@ function compFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants):
     x: Math.log10(p.tvl_usd / 1e8),
     y: Math.log10(p.mcap_usd!),
     g: growthPct / 100,
-    logAge: Math.log10(ageForModel + 1),
+    z: ageFeature(age),
     logChains: Math.log10(Math.max(1, p.chains.length)),
     listedAt: p.listed_at,
     ageKnown: age !== null,
     growthMult: 1 + (growthPct / 100) * V1.growth_weight,
     maturity: V1.maturity_floor + (Math.min(Math.max(ageForModel, 0), V1.maturity_days) / V1.maturity_days) * V1.maturity_range,
   };
+}
+
+/** The final fit: Huber-robust regression of log10(mcap) on size and the age feature. */
+function maturityFit(rows: CompFeatures[], model: ModelConstants): CurveFit {
+  const beta = huberFit(rows, (r) => [1, r.x, r.z], (r) => r.y, model, true);
+  return { intercept: beta[0]!, slope: beta[1]!, ageCoef: beta[2]! };
 }
 
 /** A backtest specification: how it fits on training rows and predicts one row, in log10. */
@@ -511,10 +562,10 @@ function allSpecs(model: ModelConstants): Spec[] {
     flatSpec(),
     linearSpec('Size curve, OLS', size, { robust: false, familyK: 0, slope: false, postGrowth: false }, model),
     linearSpec('Size curve, robust', size, { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
-    linearSpec('Size curve, robust, x fixed growth (this radar)', size, { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('Size curve, robust, x fixed growth', size, { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
+    linearSpec('Size + fitted age, x fixed growth (this radar)', (r) => [1, r.x, r.z], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
     linearSpec('+ category offsets', size, { robust: true, familyK: 5, slope: false, postGrowth: true }, model),
     linearSpec('+ fitted growth', (r) => [1, r.x, r.g], { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
-    linearSpec('+ fitted age', (r) => [1, r.x, r.logAge], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
     linearSpec('+ chain count', (r) => [1, r.x, r.logChains], { robust: true, familyK: 0, slope: false, postGrowth: true }, model),
     linearSpec('+ growth x size', (r) => [1, r.x, r.g, r.g * r.x], { robust: true, familyK: 0, slope: false, postGrowth: false }, model),
     linearSpec('+ per-category slopes', size, { robust: true, familyK: 0, slope: true, postGrowth: true }, model),
@@ -536,9 +587,15 @@ function specMetrics(errors: number[]): SpecMetrics {
 }
 
 /**
- * The backtest: leave-one-out and a 70/30 time-split for every specification, and the
+ * The backtest: leave-one-out and a 70/30 time-split for every specification, the
+ * nested ablation (size-only -> +growth -> +age) with median misses, and the
  * uncertainty band calibrated from the final specification's own leave-one-out misses.
- * Every fit inside a fold uses only that fold's training rows.
+ * Every fit inside a fold uses only that fold's training rows. The time-split trains
+ * on the oldest listings and tests the newest, so it splits on the very variable the
+ * age term fits: an age coefficient is barely identified on old listings alone, and
+ * the split's age number reads that confounding, not the age term's live accuracy.
+ * Leave-one-out, which holds out one comp at a time from the full age range, is the
+ * age model's honest out-of-sample read.
  */
 export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): { backtest: BacktestData; fit: CurveFit; finalLooErrors: number[] } {
   const comps = cleanComps(snapshot, model)
@@ -553,6 +610,12 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
   const testTs = dated.slice(cut);
 
   const rows: BacktestRow[] = [];
+  const ablationByName = new Map<string, AblationRow>();
+  const ablationNames: Record<string, string> = {
+    'Size curve, robust': 'Size only',
+    'Size curve, robust, x fixed growth': 'Size + growth',
+    'Size + fitted age, x fixed growth (this radar)': 'Size + growth + fitted age',
+  };
   let finalLooErrors: number[] = [];
   for (const spec of specs) {
     const looErrors = comps.map((r, i) => spec.predict(spec.fit(comps.filter((_, j) => j !== i)), r) - r.y);
@@ -561,16 +624,30 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
     const loo = specMetrics(looErrors);
     const ts = specMetrics(tsErrors);
     if (spec.name.includes('this radar')) finalLooErrors = looErrors;
+    const ablationName = ablationNames[spec.name];
+    if (ablationName !== undefined) {
+      ablationByName.set(ablationName, {
+        name: ablationName,
+        loo_miss: round4(loo.miss),
+        loo_median: round4(10 ** median(looErrors.map(Math.abs))),
+        loo_within3: round4(loo.within3),
+        ts_miss: round4(ts.miss),
+        ts_median: round4(10 ** median(tsErrors.map(Math.abs))),
+        ts_within3: round4(ts.within3),
+      });
+    }
     rows.push({ name: spec.name, loo_miss: round4(loo.miss), loo_within3: round4(loo.within3), ts_miss: round4(ts.miss), ts_within3: round4(ts.within3) });
   }
+  const ablation = ['Size only', 'Size + growth', 'Size + growth + fitted age'].map((n) => ablationByName.get(n)!);
   const absSorted = [...finalLooErrors].map(Math.abs).sort((a, b) => a - b);
   const band80 = 10 ** quantileSorted(absSorted, model.band_quantile);
   const band50 = 10 ** quantileSorted(absSorted, model.haircut_quantile);
   const looSd = Math.sqrt(finalLooErrors.reduce((a, e) => a + e * e, 0) / finalLooErrors.length);
-  const beta = huberFit(comps, (r) => [1, r.x], (r) => r.y, model, true);
+  const fit = maturityFit(comps, model);
   return {
     backtest: {
       rows,
+      ablation,
       loo_n: comps.length,
       ts_train_n: trainTs.length,
       ts_test_n: testTs.length,
@@ -580,7 +657,7 @@ export function runBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): 
       band50: round4(band50),
       loo_sd: round4(looSd),
     },
-    fit: { intercept: beta[0]!, slope: beta[1]! },
+    fit,
     finalLooErrors,
   };
 }
@@ -595,14 +672,15 @@ export function impliedValue(
   asOf: string,
   fit: CurveFit,
   model: ModelConstants,
-): { implied: number; curveValue: number; growthPct: number; growthMult: number; age: number | null } {
+): { implied: number; curveValue: number; growthPct: number; growthMult: number; ageMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
+  const ageMult = ageFactor(age, fit.ageCoef);
   const curveValue = 10 ** (fit.intercept + fit.slope * Math.log10(protocol.tvl_usd / 1e8));
-  const implied = Math.max(1, Math.round(curveValue * growthMult));
-  return { implied, curveValue: Math.round(curveValue), growthPct, growthMult, age };
+  const implied = Math.max(1, Math.min(100_000_000_000_000, Math.round(curveValue * growthMult * ageMult)));
+  return { implied, curveValue: Math.round(curveValue), growthPct, growthMult, ageMult, age };
 }
 
 /** The first chain a protocol names, or a neutral phrase. */
@@ -730,54 +808,69 @@ function riskFor(p: SnapshotProtocol, chain: string): string {
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan
- * is derived from the protocol's own record (category, chains, TVL, age) and its
- * verdict: a SKIP row farms a $10 test position only, and the first step states the
- * verdict and the net dollars behind it. The dashboard's farmSteps is the same derivation.
+ * A protocol's farm plan: each step names its week, its action, its dollar cost and
+ * its time, derived from the protocol's own record (category, chains, TVL, age) and
+ * its verdict. A SKIP row farms a $10 test position in six steps, a THIN row adds the
+ * weekly cadence, and a FARM row adds an exit rule on top: withdraw instead of adding
+ * capital when TVL falls 15% week over week or the points page stops counting the
+ * position. The dashboard's farmSteps is the same derivation, step for step.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null, verdict: Verdict, netUsd: number, model: ModelConstants = MODEL): FarmStep[] {
   const chain = chainOf(p);
   const capital = verdict === 'SKIP' ? 10 : capitalFor(p);
   const hold = holdDaysFor(age);
+  const weeks = Math.ceil(hold / 7);
   const gas = gasFor(chain);
   const netPhrase = netUsd < 0 ? `about -$${Math.abs(netUsd).toFixed(2)}` : `about $${netUsd.toFixed(2)}`;
-  return [
+  const steps: FarmStep[] = [
     {
-      text: `Verdict ${verdict}: at the $${model.verdict_capital.toLocaleString('en-US')} yardstick this farm nets ${netPhrase} after gas and the ${Math.round(model.hurdle_rate * 100)}% hurdle. Use a fresh wallet that holds only the funds you plan to farm, and open ${p.name} only from the link its own docs publish.`,
+      text: `Week 1: verdict ${verdict} - at the $${model.verdict_capital.toLocaleString('en-US')} yardstick this farm nets ${netPhrase} after gas and the ${Math.round(model.hurdle_rate * 100)}% hurdle. Use a fresh wallet that holds only the funds you plan to farm, and open ${p.name} only from the link its own docs publish.`,
       cost: gas.first,
       time: '10 minutes',
     },
     {
-      text: actionFor(p, capital, chain),
+      text: `Week 1: ${actionFor(p, capital, chain)}`,
       cost: `$${capital} of capital and ${gas.setup}`,
       time: '15 minutes to set up',
     },
-    {
-      text: weeklyFor(p, chain),
+  ];
+  if (verdict !== 'SKIP') {
+    steps.push({
+      text: `Week 2: ${weeklyFor(p, chain)} Repeat weekly until the exit rule or the hold below says otherwise.`,
       cost: gas.weekly,
       time: '10 minutes a week',
-    },
+    });
+  }
+  steps.push(
     {
-      text: `Open the protocol's points or rewards page, confirm the position is counted, and save a dated screenshot of the balance.`,
+      text: `Week 2: open the protocol's points or rewards page, confirm the position is counted, and save a dated screenshot of the balance.`,
       cost: 'no fee to check',
       time: '10 minutes',
     },
     {
-      text: `Hold the position for at least ${hold} days with one qualifying action a week, so the activity spans more than one snapshot.`,
+      text: `Weeks 1-${weeks}: hold the position for at least ${hold} days with one qualifying action a week, so the activity spans more than one snapshot.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: riskFor(p, chain),
+      text: `Before exit: ${riskFor(p, chain)}`,
       cost: gas.setup,
       time: '15 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction in a farm log, and claim only from the protocol's own link: never pay to claim.`,
+      text: `Throughout: write the wallet, the dates and every transaction in a farm log, and claim only from the protocol's own link: never pay to claim.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },
-  ];
+  );
+  if (verdict === 'FARM') {
+    steps.splice(4, 0, {
+      text: `Exit rule: if ${p.name}'s TVL falls 15% week over week, or the points page stops counting the position for two weeks in a row, start the exit below instead of adding more capital.`,
+      cost: gas.setup,
+      time: '5 minutes a week to check',
+    });
+  }
+  return steps;
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
@@ -824,6 +917,7 @@ export function buildBoard(
       curve_value_usd: s.v.curveValue,
       growth_pct: s.v.growthPct,
       growth_multiplier: round4(s.v.growthMult),
+      age_multiplier: round4(s.v.ageMult),
       gross_usd: s.verdict.gross,
       cost_usd: s.verdict.costs,
       hold_days: s.hold,
@@ -872,6 +966,7 @@ export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
     net_usd: row.net_usd,
     curve_value_usd: row.model.curve_value_usd,
     growth_multiplier: row.model.growth_multiplier,
+    age_multiplier: row.model.age_multiplier,
     gross_usd: row.model.gross_usd,
     cost_usd: row.model.cost_usd,
     hold_days: row.model.hold_days,
@@ -892,7 +987,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     .map((p) => {
       const rawGrowth = finite(p.change_7d, 0);
       const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-      return { slug: p.slug, x: Math.log10(p.tvl_usd / 1e8), y: Math.log10(p.mcap_usd!), g: growthPct / 100 };
+      return { slug: p.slug, x: Math.log10(p.tvl_usd / 1e8), y: Math.log10(p.mcap_usd!), g: growthPct / 100, a: ageFeature(ageDays(snapshot.as_of, p.listed_at)) };
     })
     .sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const verdictCounts = { FARM: 0, THIN: 0, SKIP: 0 };
