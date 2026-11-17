@@ -329,6 +329,7 @@ function buildDataset(
       slug: l.slug,
       name: l.name,
       category: l.category,
+      chains: [...l.chains],
       tvl: l.tvl_usd,
       mcap: l.mcap_usd,
       ratio: l.ratio,

@@ -217,6 +217,10 @@ export function round2(v: number): number {
   return Math.round(v * 100) / 100;
 }
 
+export function round4(v: number): number {
+  return Math.round(v * 1e4) / 1e4;
+}
+
 // ------------------------------------------------------- linear algebra
 
 /**
@@ -817,10 +821,13 @@ export function runBacktest(comps: FitRow[], boardAges: (number | null)[]): Back
     },
   ];
 
-  // Bands from the final specification's LOO absolute errors.
+  // Bands from the final specification's LOO absolute errors. Rounded to
+  // 4 decimals HERE, in the backtest result, so every downstream consumer
+  // (row bands, verdicts, dataset summary, page refit) uses the same
+  // stored values instead of full precision.
   const absFinal = looFinal.map((e) => Math.abs(e)).sort((a, b) => a - b);
-  const band80 = Math.pow(10, quantileSorted(absFinal, BAND_Q));
-  const haircut = Math.pow(10, quantileSorted(absFinal, HAIRCUT_Q));
+  const band80 = round4(Math.pow(10, quantileSorted(absFinal, BAND_Q)));
+  const haircut = round4(Math.pow(10, quantileSorted(absFinal, HAIRCUT_Q)));
   const looSd = looSdOf(looFinal);
 
   // Bootstrap: each age form against the final specification.
@@ -1275,9 +1282,9 @@ export function buildBoardRows(
       verdict: econ.verdict,
       net_usd: econ.net,
       model: {
-        curve_value_usd: round2(econ.curveValue),
+        curve_value_usd: Math.round(econ.curveValue),
         growth_pct: econ.growthPct,
-        growth_multiplier: econ.growthMultiplier,
+        growth_multiplier: round4(econ.growthMultiplier),
         gross_usd: econ.gross,
         cost_usd: econ.cost,
         hold_days: econ.hold,
@@ -1333,6 +1340,7 @@ export interface LiveRow {
   slug: string;
   name: string;
   category: string | null;
+  chains: string[];
   tvl_usd: number;
   mcap_usd: number;
   ratio: number;
@@ -1346,6 +1354,7 @@ export function buildLiveRows(protocols: Proto[]): LiveRow[] {
       slug: p.slug,
       name: p.name,
       category: p.category,
+      chains: [...p.chains],
       tvl_usd: p.tvl_usd,
       mcap_usd: p.mcap_usd as number,
       ratio: Math.round((p.mcap_usd as number) / p.tvl_usd * 1e4) / 1e4,

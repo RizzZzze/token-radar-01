@@ -111,6 +111,7 @@
     return Math.min(120, Math.max(-60, p));
   }
   function growthMult(pct) { return 1 + (clampPct(pct) * 0.5) / 100; }
+  function round4(v) { return Math.round(v * 1e4) / 1e4; }
   function growthG(pct) { return clampPct(pct) / 100; }
   function ageFeature(age) { return age === null ? 0 : Math.log1p(age / 365); }
   function maturityFeature(age, tau) { return age === null ? 0 : 1 - Math.exp(-age / tau); }
@@ -377,8 +378,8 @@
       { name: "size + growth + saturating age", looMiss: errorMetrics(satLoo.errors).miss, looMedian: errorMetrics(satLoo.errors).medianMiss, ts70Miss: errorMetrics(sat70.errors).miss, ts50Miss: errorMetrics(sat50.errors).miss }
     ];
     var absFinal = looFinal.map(function (e) { return Math.abs(e); }).sort(function (a, b) { return a - b; });
-    var band80 = Math.pow(10, quantileSorted(absFinal, 0.8));
-    var haircut = Math.pow(10, quantileSorted(absFinal, 0.5));
+    var band80 = round4(Math.pow(10, quantileSorted(absFinal, 0.8)));
+    var haircut = round4(Math.pow(10, quantileSorted(absFinal, 0.5)));
     var bootLog1p = pairedBootstrap(looAgeFit, looFinal);
     var bootSat = pairedBootstrap(satLoo.errors, looFinal);
     var ageBeta = huberFit(comps.map(designSizeAge), y);
@@ -452,7 +453,7 @@
     var netLow = gross / haircut - cost;
     var verdict = netLow > 0 ? "FARM" : net > 0 ? "THIN" : "SKIP";
     return {
-      curveValue: curveValue, growthPct: clampPct(pct), growthMultiplier: mult,
+      curveValue: Math.round(curveValue), growthPct: clampPct(pct), growthMultiplier: round4(mult),
       implied: implied, bandLow: bandLow, bandHigh: bandHigh,
       gross: round2(gross), cost: round2(cost), net: round2(net), netLow: round2(netLow),
       gasTotal: gasTotal, hold: hold, verdict: verdict
@@ -853,13 +854,14 @@
     var h = '<div class="card"><h2>Live tokens — recorded market caps</h2>' +
       "<p class=\"muted small\">The 24 largest protocols with a recorded token, " +
       "excluding the CEX category, by market cap. Ratio = market cap / TVL.</p>" +
-      '<table><thead><tr><th class="num">#</th><th>Protocol</th><th>Category</th>' +
+      '<table><thead><tr><th class="num">#</th><th>Protocol</th><th>Category</th><th>Chains</th>' +
       '<th class="num">TVL</th><th class="num">Market cap</th><th class="num">Ratio</th><th class="num">7d</th></tr></thead><tbody>';
     for (var i = 0; i < D.live.length; i++) {
       var l = D.live[i];
       h += "<tr><td class=\"num\">" + (i + 1) + "</td><td><strong>" + esc(l.name) + "</strong> " +
         '<span class="muted small">' + esc(l.slug) + "</span></td>" +
         "<td>" + esc(l.category === null ? "—" : l.category) + "</td>" +
+        "<td>" + esc(l.chains.join(", ")) + "</td>" +
         '<td class="num">' + fmtCompact(l.tvl) + "</td>" +
         '<td class="num">' + fmtCompact(l.mcap) + "</td>" +
         '<td class="num">' + l.ratio.toFixed(4) + "</td>" +
